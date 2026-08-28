@@ -1,0 +1,14 @@
+# Build from this directory (cargo build). Requires the espup toolchain:
+#   cargo install espup && espup install
+# then add a rust-toolchain.toml here pinning the installed `esp-<version>` channel.
+[target.xtensa-esp32s3-none-elf]
+rustflags = [
+    "-C", "link-arg=-nostartfiles",
+    "-C", "link-arg=-Wl,-Tlinkall.x",
+]
+
+[build]
+target = "xtensa-esp32s3-none-elf"
+
+[unstable]
+build-std = ["core"]
