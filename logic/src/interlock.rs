@@ -5,6 +5,7 @@
 //! truth table, unit-tested against SPECS §11.
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u32)]
 pub enum ErrorCode {
     DoorOpen,
     Jam,
@@ -13,6 +14,22 @@ pub enum ErrorCode {
     RollEnd,
     Watchdog,
     Brownout,
+}
+
+impl ErrorCode {
+    /// Numeric fault code for the field-atomic `Status` (ARCHITECTURE §5.2).
+    /// Payload-carrying variants are tagged with the top bit.
+    pub const fn code(self) -> u32 {
+        match self {
+            ErrorCode::DoorOpen => 1,
+            ErrorCode::Jam => 2,
+            ErrorCode::Driver(c) => 0x8000_0000 | c as u32,
+            ErrorCode::CriticalBattery => 3,
+            ErrorCode::RollEnd => 4,
+            ErrorCode::Watchdog => 5,
+            ErrorCode::Brownout => 6,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

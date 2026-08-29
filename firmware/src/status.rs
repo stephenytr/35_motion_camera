@@ -63,3 +63,7 @@ impl Status {
         self.state.store(s as u32, Ordering::Relaxed);
     }
 }
+
+/// Global status (ARCHITECTURE §5.2): field-atomic, single writer per field,
+/// read lock-free by the UI.
+pub static STATUS: Status = Status::new();

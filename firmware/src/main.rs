@@ -1,34 +1,84 @@
-//! Firmware bring-up skeleton — structure per ARCHITECTURE.md §11.
+//! Firmware bring-up — M1: dual-core embassy executors (ARCHITECTURE §5.1).
 //!
-//! Boot order (ARCHITECTURE §11): safe state FIRST, then esp-hal init, then the
-//! two-plane bootstrap. The placeholder loop is replaced at bring-up by:
-//! core 0 embassy executor (ui / supervisor / power / storage) and core 1
-//! (director task + raw ISRs at P2/P3).
+//! Core 0: ui / power / storage / supervisor tasks on the esp-rtos thread-mode
+//! executor. Core 1: the director task alone (it owns SPI2 in M3; ISRs will
+//! preempt it at P2/P3 in M2).
+//!
+//! Inter-plane links (ARCHITECTURE §5.2):
+//!   - commands: heapless spsc queue, supervisor -> director (lock-free)
+//!   - events:   embassy channel, director/ISRs -> tasks (try_send only)
+//!   - status:   field-atomic static read lock-free by the UI
 
 #![no_std]
 #![no_main]
 
+mod command;
 mod consts;
 mod director;
 mod drivers;
 mod fault;
+mod power;
 mod rt;
 mod status;
 mod storage;
 mod supervisor;
 mod ui;
 
-#[esp_hal::entry]
-fn main() -> ! {
+use embassy_executor::Spawner;
+use embassy_time::{Duration, Ticker};
+use esp_backtrace as _;
+use esp_hal::system::Stack;
+use esp_hal::timer::timg::TimerGroup;
+use log::LevelFilter;
+use static_cell::StaticCell;
+
+esp_bootloader_esp_idf::esp_app_desc!();
+
+#[esp_rtos::main]
+async fn main(spawner: Spawner) {
+    esp_println::logger::init_logger(LevelFilter::Info);
     rt::safe_state();
 
-    let _peripherals = esp_hal::init(esp_hal::Config::default());
+    let peripherals = esp_hal::init(esp_hal::Config::default());
 
-    loop {}
-}
+    // Command queue: one-time split into the two single-owner halves.
+    let cmd_q: &'static mut command::CmdQueue =
+        command::CMD_QUEUE_CELL.init(command::CmdQueue::new());
+    let (cmd_tx, cmd_rx) = cmd_q.split();
 
-#[panic_handler]
-fn panic(_info: &core::panic::PanicInfo) -> ! {
-    rt::safe_state();
-    loop {}
+    // Core 0 scheduler: timer + software interrupt 0 (ARCHITECTURE §2: P1).
+    let timg0 = TimerGroup::new(peripherals.TIMG0);
+    esp_rtos::start(timg0.timer0, peripherals.FROM_CPU_INTR0);
+
+    // Command plane tasks on core 0 (ARCHITECTURE §5.1).
+    spawner
+        .spawn(supervisor::supervisor_task(&fault::EVENTS, cmd_tx, &status::STATUS).unwrap());
+    spawner.spawn(ui::ui_task(&status::STATUS).unwrap());
+    spawner.spawn(power::power_task(&fault::EVENTS, &status::STATUS).unwrap());
+    spawner.spawn(storage::storage_task(&status::STATUS).unwrap());
+
+    // Core 1: the director has its own executor (ARCHITECTURE §5.1, §6).
+    static APP_CORE_STACK: StaticCell<Stack<16384>> = StaticCell::new();
+    let app_core_stack = APP_CORE_STACK.init(Stack::new());
+
+    esp_rtos::start_second_core(
+        peripherals.CPU_CTRL,
+        peripherals.FROM_CPU_INTR1,
+        app_core_stack,
+        move || {
+            static EXECUTOR: StaticCell<esp_rtos::embassy::Executor> = StaticCell::new();
+            let executor = EXECUTOR.init(esp_rtos::embassy::Executor::new());
+            executor.run(|spawner| {
+                spawner
+                    .spawn(director::director_task(&fault::EVENTS, cmd_rx, &status::STATUS).unwrap());
+            });
+        },
+    );
+
+    // Keep the boot task alive as a slow heartbeat while the executors run.
+    let mut ticker = Ticker::every(Duration::from_secs(5));
+    loop {
+        ticker.next().await;
+        log::info!("main: both executors alive");
+    }
 }
