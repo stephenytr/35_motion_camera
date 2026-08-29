@@ -70,6 +70,9 @@ extern "C" fn hold_isr() {
         };
         t.clear_interrupt();
     });
+    if crate::rt::safe_active() {
+        return;
+    }
     shutter::hold();
 }
 
@@ -81,5 +84,8 @@ extern "C" fn exp_end_isr() {
         };
         t.clear_interrupt();
     });
+    if crate::rt::safe_active() {
+        return;
+    }
     shutter::off();
 }

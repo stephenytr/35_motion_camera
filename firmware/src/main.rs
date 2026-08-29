@@ -23,6 +23,7 @@ mod status;
 mod storage;
 mod supervisor;
 mod ui;
+mod wdt;
 
 use embassy_executor::Spawner;
 use embassy_time::{Duration, Ticker};
@@ -41,6 +42,12 @@ async fn main(spawner: Spawner) {
 
     let peripherals = esp_hal::init(esp_hal::Config::default());
 
+    // Fault marker from the last run (ARCHITECTURE §4.4): the deadman writes
+    // it, the RTC watchdog reboots, and we report it here before clearing.
+    if let Some(code) = fault::marker_take() {
+        log::error!("boot: fault marker {code:#010x} — ERROR WD");
+    }
+
     // Command queue: one-time split into the two single-owner halves.
     let cmd_q: &'static mut command::CmdQueue =
         command::CMD_QUEUE_CELL.init(command::CmdQueue::new());
@@ -58,6 +65,7 @@ async fn main(spawner: Spawner) {
     spawner.spawn(ui::ui_task(&status::STATUS).unwrap());
     spawner.spawn(power::power_task(&fault::EVENTS, &status::STATUS).unwrap());
     spawner.spawn(storage::storage_task(&status::STATUS).unwrap());
+    spawner.spawn(wdt::wdt_task(peripherals.RTC_TIMER).unwrap());
 
     // Core 1: the director has its own executor (ARCHITECTURE §5.1, §6).
     static APP_CORE_STACK: StaticCell<Stack<16384>> = StaticCell::new();
@@ -71,6 +79,7 @@ async fn main(spawner: Spawner) {
             // RT plane lives entirely on core 1 (ARCHITECTURE §2): bind the
             // ISRs here so their handlers run on this core, and construct the
             // LEDC driver here (HAL wrappers are not Send).
+            rt::deadman::init();
             rt::heartbeat::init(timg0.timer0);
             rt::shutter::init(timg1.timer0, timg0.timer1);
             drivers::shutter::init(
@@ -94,5 +103,16 @@ async fn main(spawner: Spawner) {
     loop {
         ticker.next().await;
         log::info!("main: both executors alive");
+    }
+}
+
+/// Panic: drive every actuator safe, then spin (ARCHITECTURE §4.6). The RTC
+/// watchdog keeps being fed, so the system stays safe and visible on serial.
+#[panic_handler]
+fn panic(info: &core::panic::PanicInfo) -> ! {
+    rt::safe_state();
+    esp_println::println!("PANIC: {}", info);
+    loop {
+        core::hint::spin_loop();
     }
 }

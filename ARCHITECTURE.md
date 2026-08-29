@@ -426,3 +426,4 @@ the alternative is external FRAM/EEPROM on a spare I²C address (hardware change
 | 14 | GPIO 7 = timing debug strobe pins | [ARCH] |
 | 15 | Deadman moves to systimer unit-1 alarm (P3); timg1.1 reassigned to the esp_rtos core-0 scheduler. Chip has 4 timg timers; RT plane (4) + executor (1) = 5 needed | signed off 2026-08-29 |
 | 16 | Bench strobe pin = GPIO 13 (user LED); final HIL pin TBD | [ARCH] |
+| 17 | Deadman (bench, esp32): TIMG1 WDT stage-0 interrupt at P3 (raw registers per IDF `timer_group_reg.h`), fed by the heartbeat each firing, timeout 2.5×period (min 100 ms) programmed at job arm. esp-hal rc has no systimer driver for esp32; the legacy FRC timers are ROM-owned and undocumented. On esp32-s3, revisit #15 (HAL systimer alarm1) or keep the WDT — same register map | signed off 2026-08-29 |

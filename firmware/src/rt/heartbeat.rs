@@ -70,6 +70,18 @@ pub fn kick() {
     });
 }
 
+/// Stop the heartbeat entirely. The deadman stays armed and will latch safe
+/// state on expiry — used by the door ISR (M2d) and as the bench fault
+/// injection. Idempotent.
+pub fn halt() {
+    HEARTBEAT.lock(|slot| {
+        let mut slot = slot.borrow_mut();
+        if let Some(hb) = slot.as_mut() {
+            hb.stop();
+        }
+    });
+}
+
 extern "C" fn heartbeat_isr() {
     HEARTBEAT.lock(|hb_cell| {
         let mut hb_slot = hb_cell.borrow_mut();
@@ -77,6 +89,12 @@ extern "C" fn heartbeat_isr() {
             return;
         };
         hb.clear_interrupt();
+
+        // Latched safe state: stop participating, no re-arm (ARCHITECTURE
+        // §4.4). The deadman ISR already drove the actuators off.
+        if super::safe_active() {
+            return;
+        }
 
         CYCLE.lock(|cyc_cell| {
             let mut cyc = cyc_cell.borrow_mut();
@@ -119,8 +137,13 @@ extern "C" fn heartbeat_isr() {
 
             if actions.park {
                 shutter::off();
+                super::deadman::disarm();
                 let _ = EVENTS.try_send(Event::JobComplete);
             } else if let Some(us) = actions.arm_heartbeat_us {
+                // Feed the deadman before the next cadence step (ARCHITECTURE
+                // §4.4): the watchdog stays covered a full timeout past any
+                // firing while a job is active.
+                super::deadman::feed();
                 let _ = hb.schedule(Duration::from_micros(us as u64));
             }
         });

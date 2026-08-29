@@ -6,9 +6,11 @@
 //! action records to hardware and pass events up via `try_send`.
 
 use core::cell::RefCell;
+use core::sync::atomic::{AtomicBool, Ordering};
 
 use embassy_sync::blocking_mutex::CriticalSectionMutex;
 
+pub mod deadman;
 pub mod heartbeat;
 pub mod shutter;
 
@@ -27,14 +29,44 @@ pub(crate) static MAILBOX: CriticalSectionMutex<RefCell<Option<Job>>> =
 /// Program a job. Only valid between jobs (when the heartbeat is parked) —
 /// the heartbeat applies the mailbox at the next FrameStart and then owns
 /// the cadence. Kicking while a job runs would corrupt the phase.
+///
+/// The deadman timeout is programmed here per ARCHITECTURE §4.4: 2.5 × the
+/// new frame period, floored at 100 ms.
 pub fn arm_job(job: Job) {
+    let timeout_us = (job.params.period_us.saturating_mul(5) / 2).max(100_000);
+    deadman::set_timeout(timeout_us);
     MAILBOX.lock(|m| *m.borrow_mut() = Some(job));
     heartbeat::kick();
 }
 
-/// Drive every actuator to its de-energized level. Called at boot, on panic, and
-/// from the door / deadman ISRs. Everything here will be `#[ram]`.
+/// Safety latch: once set (deadman / door ISR), the RT plane stops. The
+/// heartbeat and shutter ISRs check it at entry; the RTC-watchdog feeder
+/// stops feeding, so the chip reboots.
+static SAFE: AtomicBool = AtomicBool::new(false);
+
+/// Drive every actuator to its de-energized level (ARCHITECTURE §4.6). Called
+/// at boot, on panic, and from the door / deadman ISRs. Raw register writes
+/// only — no locks, no HAL state — so it works pre-init and at P3.
+#[esp_hal::ram]
 pub fn safe_state() {
-    // TODO: shutter LEDC duty 0, take-up LEDC duty 0, TMC5160 EN low,
-    // heartbeat/deadman timers stopped.
+    // Shutter + take-up LEDC channels to 0%, with the DUTY_START latch pulse.
+    for ch in 0..2 {
+        let ch = esp_hal::peripherals::LEDC::regs().hsch(ch);
+        ch.duty().write(|w| unsafe { w.duty().bits(0) });
+        ch.conf1().modify(|_, w| w.duty_start().set_bit());
+    }
+    // TODO(M3): TMC5160 EN low (ARCHITECTURE §4.6).
+}
+
+/// Latched safe state: actuators off *and* the RT plane / watchdog feeder are
+/// told to stay down. Called by the deadman ISR (and later the door ISR).
+#[esp_hal::ram]
+pub fn latch_safe_state() {
+    SAFE.store(true, Ordering::SeqCst);
+    safe_state();
+}
+
+/// True once safe state is latched.
+pub fn safe_active() -> bool {
+    SAFE.load(Ordering::SeqCst)
 }
