@@ -9,28 +9,24 @@
 use embassy_time::{Duration, Timer};
 use log::info;
 
-use crate::command::{CmdProducer, Command};
+use crate::command::CmdProducer;
 use crate::fault::{Event, EventChannel};
 use crate::status::{State, Status};
 
 #[embassy_executor::task]
 pub async fn supervisor_task(
     events: &'static EventChannel,
-    mut cmds: CmdProducer,
+    _cmds: CmdProducer,
     status: &'static Status,
 ) {
     status.set_state(State::Idle);
     info!("supervisor: up, state = {:?}", status.state());
 
-    cmds.enqueue(Command::SelfTest).map_err(|_| {
-        info!("supervisor: command queue full, dropping SelfTest");
-    }).ok();
-
     loop {
         match events.receive().await {
             Event::FrameDone(n) => {
+                // Silent by design: 24 Hz of FrameDone must not flood the log.
                 status.frames_exposed.store(n, core::sync::atomic::Ordering::Relaxed);
-                info!("supervisor: FrameDone({n})");
             }
             Event::JobComplete => {
                 status.set_state(State::Idle);

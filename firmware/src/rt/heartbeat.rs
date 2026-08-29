@@ -1,0 +1,147 @@
+//! Heartbeat ISR (timg0.0, P2, core 1) — the phase authority (ARCHITECTURE
+//! §3.1, §4.1). Fires twice per frame: FrameStart → ExposeStart.
+//!
+//! The ISR is a thin wrapper: it applies the pure `logic::frame_fsm::advance`
+//! action record, re-arms itself, strokes the debug LED, and publishes events
+//! with `try_send`. Nothing here blocks, logs, or uses floats.
+
+use core::cell::RefCell;
+
+use embassy_sync::blocking_mutex::CriticalSectionMutex;
+use esp_hal::gpio::Output;
+use esp_hal::interrupt::{InterruptHandler, Priority};
+use esp_hal::time::Duration;
+use esp_hal::timer::{timg::Timer, OneShotTimer};
+use esp_hal::Blocking;
+use logic::frame_fsm::{advance, FrameParams, Phase};
+
+use super::MAILBOX;
+use crate::fault::{Event, EVENTS};
+
+/// Runtime cycle state, owned exclusively by the heartbeat ISR.
+/// One reader/writer, one core, one priority — the mutex exists to satisfy
+/// Rust and to bound the cost, not to arbitrate contention.
+pub struct Cycle {
+    pub params: FrameParams,
+    pub phase: Phase,
+    pub remaining: Option<u32>,
+    pub elapsed: u32,
+}
+
+static CYCLE: CriticalSectionMutex<RefCell<Cycle>> = CriticalSectionMutex::new(RefCell::new(Cycle {
+    // Placeholder, replaced by the first arm_job before any firing.
+    params: FrameParams {
+        period_us: 41_666,
+        pull_us: 22_916,
+        settle_us: logic::consts::SETTLE_US,
+        exp_us: 12_000,
+        shutter_enabled: true,
+    },
+        phase: Phase::FrameStart,
+        remaining: None,
+        elapsed: 0,
+    }));
+
+static HEARTBEAT: CriticalSectionMutex<RefCell<Option<OneShotTimer<'static, Blocking>>>> =
+    CriticalSectionMutex::new(RefCell::new(None));
+
+static STROBE: CriticalSectionMutex<RefCell<Option<Output<'static>>>> =
+    CriticalSectionMutex::new(RefCell::new(None));
+
+/// Bind the ISR on core 1. `timer` is constructed in `main` (core 0) and
+/// moved here — handlers run on the core where they are *set up*, per
+/// esp-hal, so this must be called inside the core-1 closure.
+pub fn init(timer: Timer<'static>, strobe: Output<'static>) {
+    let mut hb = OneShotTimer::new(timer);
+    hb.set_interrupt_handler(InterruptHandler::new(
+        heartbeat_isr,
+        Priority::Priority2, // ARCHITECTURE §2: frame timing at P2
+    ));
+    hb.listen();
+
+    HEARTBEAT.lock(|slot| *slot.borrow_mut() = Some(hb));
+    STROBE.lock(|slot| *slot.borrow_mut() = Some(strobe));
+}
+
+/// Wake a parked heartbeat so a newly armed job starts immediately.
+/// Called by `arm_job` only while parked (see `rt::arm_job` invariant).
+pub fn kick() {
+    HEARTBEAT.lock(|slot| {
+        let mut slot = slot.borrow_mut();
+        if let Some(hb) = slot.as_mut() {
+            let _ = hb.schedule(Duration::from_micros(1));
+        }
+    });
+}
+
+extern "C" fn heartbeat_isr() {
+    HEARTBEAT.lock(|hb_cell| {
+        let mut hb_slot = hb_cell.borrow_mut();
+        let Some(hb) = hb_slot.as_mut() else {
+            return;
+        };
+        hb.clear_interrupt();
+
+        CYCLE.lock(|cyc_cell| {
+            let mut cyc = cyc_cell.borrow_mut();
+            STROBE.lock(|strobe_cell| {
+                let mut strobe = strobe_cell.borrow_mut();
+
+                // Apply a pending job at frame start. The director only arms
+                // while parked, so this never interrupts an active cycle.
+                if cyc.phase == Phase::FrameStart {
+                    if let Some(job) = MAILBOX.lock(|m| m.borrow_mut().take()) {
+                        cyc.params = job.params;
+                        cyc.remaining = job.frames;
+                        cyc.elapsed = 0;
+                    }
+                }
+
+                let params = cyc.params; // Copy: split borrows cannot span a struct
+                let actions = advance(cyc.phase, &params, &mut cyc.remaining);
+                cyc.phase = match cyc.phase {
+                    Phase::FrameStart => Phase::ExposeStart,
+                    Phase::ExposeStart => Phase::FrameStart,
+                };
+
+                // Apply the action record — register writes only, no waits.
+                if actions.rmt_kick {
+                    // TODO(M3): non-blocking RMT transmit (ARCHITECTURE §3.2)
+                }
+                if actions.shutter_pull {
+                    // TODO(M2b): shutter LEDC duty 100% (ARCHITECTURE §3.3)
+                }
+                if actions.arm_hold_us.is_some() {
+                    // TODO(M2b): arm peak-hold one-shot (timg1.0, 4 ms)
+                }
+                if actions.arm_exposure_us.is_some() {
+                    // TODO(M2b): arm exposure-end one-shot (timg0.1)
+                }
+
+                if actions.frame_counted {
+                    cyc.elapsed += 1;
+                    let _ = EVENTS.try_send(Event::FrameDone(cyc.elapsed));
+                }
+
+                if actions.park {
+                    if let Some(s) = strobe.as_mut() {
+                        s.set_low();
+                    }
+                    let _ = EVENTS.try_send(Event::JobComplete);
+                } else if let Some(us) = actions.arm_heartbeat_us {
+                    let _ = hb.schedule(Duration::from_micros(us as u64));
+                }
+
+                // Bench strobe: LED on while the film is moving (pulldown +
+                // settle window), off while exposing.
+                if let Some(s) = strobe.as_mut() {
+                    if cyc.phase == Phase::ExposeStart {
+                        s.set_high();
+                    } else {
+                        s.set_low();
+                    }
+                }
+            });
+        });
+    });
+}

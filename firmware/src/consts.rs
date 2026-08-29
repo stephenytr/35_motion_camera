@@ -12,5 +12,6 @@ pub mod isr_priority {
     pub const ASYNC: u8 = 1;
 }
 
-/// HIL timing debug strobe pins (ARCHITECTURE §11): frame strobe + phase marker.
-pub const DEBUG_STROBE_GPIO: u8 = 7;
+/// HIL timing debug strobe pin (ARCHITECTURE §11): frame strobe + phase marker.
+/// Bench: user LED on GPIO 13, active-high marks the frame phase.
+pub const DEBUG_STROBE_GPIO: u8 = 13;

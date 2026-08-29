@@ -72,7 +72,7 @@ install their own handlers at construction; we leave all async drivers at defaul
 
 | Owner | Runs on | Priority | Role |
 |---|---|---|---|
-| Deadman timer ISR (timg1.1) | core 1 | **P3** | last-line safe state, nothing preempts it but itself |
+| Deadman timer ISR (systimer unit-1 alarm) | core 1 | **P3** | last-line safe state, nothing preempts it but itself |
 | Door interlock ISR (GPIO) | core 1 | **P3** | immediate safe state on door open |
 | Heartbeat ISR (timg0.0) | core 1 | **P2** | frame-phase FSM advance |
 | Exposure-end / peak-hold ISRs (timg0.1, timg1.0) | core 1 | **P2** | shutter timing |
@@ -163,8 +163,9 @@ Direction from job. No closed loop in v1 [LOCKED].
 | timg0.0 | heartbeat | one-shot, self re-armed (2×/frame) |
 | timg0.1 | exposure-end | one-shot |
 | timg1.0 | peak→hold | one-shot (4 ms) |
-| timg1.1 | deadman | one-shot, re-armed by heartbeat each firing |
-| systimer | embassy time driver | async `Timer::after` (soft plane only) |
+| timg1.1 | esp_rtos core-0 scheduler | executor alarm (P1, infra) |
+| systimer unit 0 | embassy time driver | async `Timer::after` (soft plane only) |
+| systimer unit 1 | deadman | one-shot, re-armed by heartbeat each firing |
 
 ---
 
@@ -423,3 +424,5 @@ the alternative is external FRAM/EEPROM on a spare I²C address (hardware change
 | 12 | Pure FSMs in host-testable `logic` crate; ISR wrappers thin | [ARCH] |
 | 13 | Counter persistence idle-only (SPECS deviation, §12) | **needs sign-off** |
 | 14 | GPIO 7 = timing debug strobe pins | [ARCH] |
+| 15 | Deadman moves to systimer unit-1 alarm (P3); timg1.1 reassigned to the esp_rtos core-0 scheduler. Chip has 4 timg timers; RT plane (4) + executor (1) = 5 needed | signed off 2026-08-29 |
+| 16 | Bench strobe pin = GPIO 13 (user LED); final HIL pin TBD | [ARCH] |
