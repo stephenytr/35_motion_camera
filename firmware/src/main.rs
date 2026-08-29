@@ -52,13 +52,6 @@ async fn main(spawner: Spawner) {
     let timg1 = TimerGroup::new(peripherals.TIMG1);
     esp_rtos::start(timg1.timer1, peripherals.FROM_CPU_INTR0);
 
-    // Bench timing strobe: user LED on GPIO 13 (consts::DEBUG_STROBE_GPIO).
-    let strobe = esp_hal::gpio::Output::new(
-        peripherals.GPIO13,
-        esp_hal::gpio::Level::Low,
-        esp_hal::gpio::OutputConfig::default(),
-    );
-
     // Command plane tasks on core 0 (ARCHITECTURE §5.1).
     spawner
         .spawn(supervisor::supervisor_task(&fault::EVENTS, cmd_tx, &status::STATUS).unwrap());
@@ -76,8 +69,14 @@ async fn main(spawner: Spawner) {
         app_core_stack,
         move || {
             // RT plane lives entirely on core 1 (ARCHITECTURE §2): bind the
-            // heartbeat ISR here so the handler runs on this core.
-            rt::heartbeat::init(timg0.timer0, strobe);
+            // ISRs here so their handlers run on this core, and construct the
+            // LEDC driver here (HAL wrappers are not Send).
+            rt::heartbeat::init(timg0.timer0);
+            rt::shutter::init(timg1.timer0, timg0.timer1);
+            drivers::shutter::init(
+                esp_hal::ledc::Ledc::new(peripherals.LEDC),
+                peripherals.GPIO13,
+            );
 
             static EXECUTOR: StaticCell<esp_rtos::embassy::Executor> = StaticCell::new();
             let executor = EXECUTOR.init(esp_rtos::embassy::Executor::new());

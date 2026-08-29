@@ -10,6 +10,7 @@ use core::cell::RefCell;
 use embassy_sync::blocking_mutex::CriticalSectionMutex;
 
 pub mod heartbeat;
+pub mod shutter;
 
 /// One parameterized job (ARCHITECTURE §4.2), programmed by the director.
 /// `frames: None` runs until stopped.
