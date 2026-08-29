@@ -11,6 +11,7 @@ use core::sync::atomic::{AtomicBool, Ordering};
 use embassy_sync::blocking_mutex::CriticalSectionMutex;
 
 pub mod deadman;
+pub mod door;
 pub mod heartbeat;
 pub mod shutter;
 

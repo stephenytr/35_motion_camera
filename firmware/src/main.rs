@@ -82,6 +82,7 @@ async fn main(spawner: Spawner) {
             rt::deadman::init();
             rt::heartbeat::init(timg0.timer0);
             rt::shutter::init(timg1.timer0, timg0.timer1);
+            rt::door::init(peripherals.IO_MUX, peripherals.GPIO4);
             drivers::shutter::init(
                 esp_hal::ledc::Ledc::new(peripherals.LEDC),
                 peripherals.GPIO13,
@@ -116,3 +117,4 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
         core::hint::spin_loop();
     }
 }
+

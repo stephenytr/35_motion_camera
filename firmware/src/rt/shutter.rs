@@ -62,6 +62,23 @@ pub fn arm_exposure(us: u32) {
     });
 }
 
+/// Stop both one-shots without waiting for them to fire. Used by the door
+/// ISR (M2d) when forcing safe state outside the normal per-frame park path
+/// — a queued hold/exposure-end firing after `safe_state()` would otherwise
+/// re-energize the solenoid.
+pub fn disarm() {
+    HOLD.lock(|slot| {
+        if let Some(t) = slot.borrow_mut().as_mut() {
+            t.stop();
+        }
+    });
+    EXP_END.lock(|slot| {
+        if let Some(t) = slot.borrow_mut().as_mut() {
+            t.stop();
+        }
+    });
+}
+
 extern "C" fn hold_isr() {
     HOLD.lock(|slot| {
         let mut slot = slot.borrow_mut();
