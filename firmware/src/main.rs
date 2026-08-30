@@ -92,6 +92,7 @@ async fn main(spawner: Spawner) {
     spawner.spawn(power::power_task(&fault::EVENTS, &status::STATUS).unwrap());
     spawner.spawn(storage::storage_task(&status::STATUS).unwrap());
     spawner.spawn(wdt::wdt_task(peripherals.RTC_TIMER).unwrap());
+    spawner.spawn(ui::pot::pot_task(peripherals.ADC1, peripherals.GPIO34).unwrap());
 
     // Core 1: the director has its own executor (ARCHITECTURE §5.1, §6).
     static APP_CORE_STACK: StaticCell<Stack<16384>> = StaticCell::new();

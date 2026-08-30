@@ -9,6 +9,7 @@
 //! backs out. RUN toggles run/stop from any view.
 
 pub mod buttons;
+pub mod pot;
 
 use core::fmt::Write as _;
 use core::sync::atomic::Ordering;
@@ -45,6 +46,9 @@ pub enum UiEvent {
     Adjust { item: MenuItem, up: bool },
     /// MENU while the transport submenu is open: execute the action.
     Transport(TransportAction),
+    /// Absolute fps from the pot input (whole steps, pot is the fps master
+    /// while turned).
+    SetFps(u8),
 }
 
 /// UI task → supervisor (both core 0): same-core channel, CS mutex is

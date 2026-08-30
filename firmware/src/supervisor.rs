@@ -158,6 +158,22 @@ pub async fn supervisor_task(
                     _ => {}
                 }
             }
+            UiEvent::SetFps(fps) => {
+                // Pot input: absolute whole-step fps. Dedupe against the
+                // current setting so an idle pot never fights the menu.
+                let fps = fps.clamp(
+                    logic::consts::FPS_MIN as u8,
+                    logic::consts::FPS_MAX as u8,
+                );
+                if settings_store::settings().fps as u8 == fps {
+                    return;
+                }
+                let mut s = settings_store::settings();
+                s.fps = fps as f32;
+                settings_store::set_settings(s);
+                info!("supervisor: fps = {fps} (pot)");
+                let _ = cmds.enqueue(Command::SetFps(fps));
+            }
             UiEvent::Transport(action) => {
                 if crate::rt::door::is_open() {
                     warn!("supervisor: transport ignored — door open (interlock)");
