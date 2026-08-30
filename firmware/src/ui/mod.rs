@@ -231,14 +231,9 @@ fn render(ui: &UiState, status: &Status) -> ([u8; COLS as usize], [u8; COLS as u
 
     match ui.level {
         Level::Main => {
+            // Status line (unchanged content, minus the roll count — freed
+            // up to fit the state word without truncating).
             let fps = (settings.fps + 0.5) as u32;
-            let _ = write!(
-                l1,
-                "{:>3}fps F{:03}/{}",
-                fps,
-                status.counter_exposed.load(Ordering::Relaxed),
-                settings.roll_frames
-            );
             let state_word = if crate::rt::safe_active() {
                 "SAFE"
             } else if status.door_open.load(Ordering::Relaxed) {
@@ -250,37 +245,26 @@ fn render(ui: &UiState, status: &Status) -> ([u8; COLS as usize], [u8; COLS as u
             } else {
                 "IDLE"
             };
-            let _ = write!(l2, "EXP {:>3}ms  {:4}", settings.exposure_ms, state_word);
+            let _ = write!(
+                l1,
+                "{:>3}fps F{:03} {:4}",
+                fps,
+                status.counter_exposed.load(Ordering::Relaxed),
+                state_word
+            );
+            // Live cursor preview: ▲/▼ moves this, so the selected item is
+            // always visible *before* MENU commits to editing it — no more
+            // guessing where the cursor landed.
+            let item = ui.menu.current();
+            let _ = write!(l2, ">{} ", short_title(item));
+            write_item_value_short(&mut l2, item, &settings, status);
         }
         Level::Item => {
             let item = ui.menu.current();
-            let _ = write!(l1, ">{}", item.title());
-            match item {
-                MenuItem::Fps => {
-                    let _ = write!(l2, "{:.1} fps", settings.fps);
-                }
-                MenuItem::Exposure => {
-                    let _ = write!(l2, "{} ms", settings.exposure_ms);
-                }
-                MenuItem::Roll => {
-                    let _ = write!(l2, "{} frames", settings.roll_frames);
-                }
-                MenuItem::Track => {
-                    let _ = write!(l2, "{:?}/{:?}", settings.mode, settings.track);
-                }
-                MenuItem::Boost => {
-                    let _ = write!(l2, "{}", if status.boost.load(Ordering::Relaxed) { "ON" } else { "OFF" });
-                }
-                MenuItem::Transport => {
-                    let _ = write!(l2, "MENU to enter");
-                }
-                MenuItem::Settings => {
-                    let _ = write!(l2, "hold {}%", settings.hold_pct);
-                }
-                MenuItem::About => {
-                    let _ = write!(l2, "35mm 1.5P v1");
-                }
-            }
+            // '*' (vs. the '>' cursor at Main) marks that ▲/▼ now edit the
+            // value instead of moving the selection.
+            let _ = write!(l1, "*{}", item.title());
+            write_item_value(&mut l2, item, &settings, status);
         }
         Level::Transport => {
             let _ = write!(l1, "TRANSPORT");
@@ -295,4 +279,91 @@ fn render(ui: &UiState, status: &Status) -> ([u8; COLS as usize], [u8; COLS as u
     }
 
     (line1(l1.as_str()), line1(l2.as_str()))
+}
+
+/// Detailed value line for the Item ("editing") view.
+fn write_item_value(
+    l2: &mut String<{ COLS as usize }>,
+    item: MenuItem,
+    settings: &logic::settings::Settings,
+    status: &Status,
+) {
+    match item {
+        MenuItem::Fps => {
+            let _ = write!(l2, "{:.1} fps", settings.fps);
+        }
+        MenuItem::Exposure => {
+            let _ = write!(l2, "{} ms", settings.exposure_ms);
+        }
+        MenuItem::Roll => {
+            let _ = write!(l2, "{} frames", settings.roll_frames);
+        }
+        MenuItem::Track => {
+            let _ = write!(l2, "{:?}/{:?}", settings.mode, settings.track);
+        }
+        MenuItem::Boost => {
+            let _ = write!(l2, "{}", if status.boost.load(Ordering::Relaxed) { "ON" } else { "OFF" });
+        }
+        MenuItem::Transport => {
+            let _ = write!(l2, "MENU to enter");
+        }
+        MenuItem::Settings => {
+            let _ = write!(l2, "hold {}%", settings.hold_pct);
+        }
+        MenuItem::About => {
+            let _ = write!(l2, "35mm 1.5P v1");
+        }
+    }
+}
+
+/// Compact value preview for the Main ("browse") cursor line — always short
+/// enough to fit next to the ">{short_title} " prefix on 16 columns, unlike
+/// `write_item_value`'s detailed text.
+fn write_item_value_short(
+    l2: &mut String<{ COLS as usize }>,
+    item: MenuItem,
+    settings: &logic::settings::Settings,
+    status: &Status,
+) {
+    match item {
+        MenuItem::Fps => {
+            let _ = write!(l2, "{:.1}", settings.fps);
+        }
+        MenuItem::Exposure => {
+            let _ = write!(l2, "{}ms", settings.exposure_ms);
+        }
+        MenuItem::Roll => {
+            let _ = write!(l2, "{}", settings.roll_frames);
+        }
+        MenuItem::Track => {
+            let _ = write!(l2, "{:?}", settings.track);
+        }
+        MenuItem::Boost => {
+            let _ = write!(l2, "{}", if status.boost.load(Ordering::Relaxed) { "ON" } else { "OFF" });
+        }
+        MenuItem::Transport => {
+            let _ = write!(l2, "->");
+        }
+        MenuItem::Settings => {
+            let _ = write!(l2, "{}%", settings.hold_pct);
+        }
+        MenuItem::About => {
+            let _ = write!(l2, "v1");
+        }
+    }
+}
+
+/// Abbreviated item name for the Main cursor line (full names live in
+/// `MenuItem::title`, used at the Item/edit level where there's more room).
+fn short_title(item: MenuItem) -> &'static str {
+    match item {
+        MenuItem::Fps => "FPS",
+        MenuItem::Exposure => "EXP",
+        MenuItem::Roll => "ROLL",
+        MenuItem::Track => "TRACK",
+        MenuItem::Boost => "BOOST",
+        MenuItem::Transport => "XPORT",
+        MenuItem::Settings => "SET",
+        MenuItem::About => "INFO",
+    }
 }
