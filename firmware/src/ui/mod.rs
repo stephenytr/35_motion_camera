@@ -49,6 +49,14 @@ pub enum UiEvent {
     /// Absolute fps from the pot input (whole steps, pot is the fps master
     /// while turned).
     SetFps(u8),
+    /// Absolute exposure from the pot input (whole ms).
+    SetExposure(u32),
+    /// BOOST held/released (SPECS §9.2: hold = boost; live-ramped mid-take).
+    BoostHold(bool),
+    /// INCH held/released (hold = inch).
+    InchHold(bool),
+    /// FRAME pressed: run exactly one frame.
+    Frame,
 }
 
 /// UI task → supervisor (both core 0): same-core channel, CS mutex is
@@ -100,6 +108,9 @@ pub async fn ui_task(
     menu: esp_hal::peripherals::GPIO25<'static>,
     up: esp_hal::peripherals::GPIO26<'static>,
     down: esp_hal::peripherals::GPIO22<'static>,
+    boost: esp_hal::peripherals::GPIO33<'static>,
+    frame: esp_hal::peripherals::GPIO36<'static>,
+    inch: esp_hal::peripherals::GPIO39<'static>,
 ) {
     // Bench I2C pins: SDA=18, SCL=19 (decision log #29) — GPIO 21/22, the
     // chip defaults, are taken (21 = TMC CS).
@@ -129,23 +140,43 @@ pub async fn ui_task(
         }
     };
 
-    let mut buttons = Buttons::new(run, menu, up, down);
+    let mut buttons = Buttons::new(run, menu, up, down, boost, frame, inch);
     buttons.boot_report();
     let mut ui = UiState::new();
-    info!("ui: up, 16x2 LCD + RUN/MENU/▲/▼, {} ms sampling", SAMPLE_MS);
+    info!(
+        "ui: up, 16x2 LCD + RUN/MENU/▲/▼/BOOST/FRAME/INCH, {} ms sampling",
+        SAMPLE_MS
+    );
 
     let mut ticker = Ticker::every(Duration::from_millis(SAMPLE_MS));
     let mut last_screen: Option<([u8; COLS as usize], [u8; COLS as usize])> = None;
+    let mut boost_prev = false;
+    let mut inch_prev = false;
 
     loop {
         ticker.next().await;
 
         let ev = buttons.sample();
 
-        // RUN is always live (shooting cluster, SPECS §9.3).
+        // Shooting cluster is always live (SPECS §9.3), like RUN.
         if ev.run_press {
             let _ = UI_EVENTS.try_send(UiEvent::RunToggle);
         }
+        if ev.frame_press {
+            let _ = UI_EVENTS.try_send(UiEvent::Frame);
+        }
+        if ev.boost_press {
+            let _ = UI_EVENTS.try_send(UiEvent::BoostHold(true));
+        } else if boost_prev && !ev.boost_held {
+            let _ = UI_EVENTS.try_send(UiEvent::BoostHold(false));
+        }
+        boost_prev = ev.boost_held;
+        if ev.inch_press {
+            let _ = UI_EVENTS.try_send(UiEvent::InchHold(true));
+        } else if inch_prev && !ev.inch_held {
+            let _ = UI_EVENTS.try_send(UiEvent::InchHold(false));
+        }
+        inch_prev = ev.inch_held;
 
         // Long-press ▲ or ▼ = back (SPECS §9.2: "long-press = back", either
         // button alone — not a two-finger chord).

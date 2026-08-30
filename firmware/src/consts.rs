@@ -47,4 +47,12 @@ pub mod ui_pins {
     pub const MENU: u8 = 25;
     pub const UP: u8 = 26;
     pub const DOWN: u8 = 22;
+    /// Shooting cluster (SPECS §9.3). 33 has an internal pull-up; 36/39
+    /// are input-only and need external 10k pull-ups on the bench.
+    pub const BOOST: u8 = 33;
+    pub const FRAME: u8 = 36;
+    pub const INCH: u8 = 39;
+    /// Pots (decision log #30): B10K dividers on ADC1.
+    pub const POT_FPS: u8 = 34;
+    pub const POT_EXPOSURE: u8 = 35;
 }

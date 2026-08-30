@@ -57,6 +57,7 @@ pub async fn supervisor_task(
     // this task; persisted to the settings store at job boundaries.
     let mut exposed: u32 = 0;
     let mut boosting: bool = false;
+    let mut inching: bool = false;
     // Last-seen values for delta detection.
     let mut last_pos: u32 = crate::rt::position::frames();
     let mut last_count: u32 = status.exposed_count.load(core::sync::atomic::Ordering::Relaxed);
@@ -77,6 +78,7 @@ pub async fn supervisor_task(
         cmds: &mut CmdProducer,
         status: &'static Status,
         boosting: &mut bool,
+        inching: &mut bool,
     ) {
         match ev {
             UiEvent::RunToggle => {
@@ -174,6 +176,71 @@ pub async fn supervisor_task(
                 info!("supervisor: fps = {fps} (pot)");
                 let _ = cmds.enqueue(Command::SetFps(fps));
             }
+            UiEvent::SetExposure(ms) => {
+                // Exposure pot: absolute whole-ms. Dedupe against the
+                // current setting so an idle pot never fights the menu.
+                let ms = ms.clamp(
+                    logic::consts::EXPOSURE_MIN_MS,
+                    logic::consts::EXPOSURE_MAX_MS,
+                );
+                if settings_store::settings().exposure_ms == ms {
+                    return;
+                }
+                let mut s = settings_store::settings();
+                s.exposure_ms = ms;
+                settings_store::set_settings(s);
+                info!("supervisor: exposure = {ms} ms (pot)");
+                let _ = cmds.enqueue(Command::SetExposure(ms));
+            }
+            UiEvent::BoostHold(on) => {
+                // BOOST is a sub-state of RUN (SPECS §4.2): only meaningful
+                // while a take runs; the director ramps it live.
+                if crate::rt::heartbeat::is_parked() {
+                    warn!("supervisor: BOOST ignored — not running");
+                    return;
+                }
+                *boosting = on;
+                status.boost.store(on, core::sync::atomic::Ordering::Relaxed);
+                info!("supervisor: boost = {}", if on { "on" } else { "off" });
+                let _ = cmds.enqueue(Command::Boost(on));
+            }
+            UiEvent::InchHold(on) => {
+                if crate::rt::door::is_open() {
+                    warn!("supervisor: INCH ignored — door open (interlock)");
+                    return;
+                }
+                if on {
+                    if !crate::rt::heartbeat::is_parked() {
+                        warn!("supervisor: INCH ignored — already running");
+                        return;
+                    }
+                    *inching = true;
+                    status.set_state(State::Inch);
+                    info!("supervisor: INCH hold — creeping");
+                    // Hold-to-inch: arm far more frames than any hold lasts;
+                    // release sends Stop below (frame-boundary park).
+                    let _ = cmds.enqueue(Command::Inch { frames: u32::MAX });
+                } else if *inching {
+                    *inching = false;
+                    info!("supervisor: INCH release — stop");
+                    let _ = cmds.enqueue(Command::Stop);
+                }
+            }
+            UiEvent::Frame => {
+                if crate::rt::door::is_open() {
+                    warn!("supervisor: FRAME ignored — door open (interlock)");
+                    return;
+                }
+                if !crate::rt::heartbeat::is_parked() {
+                    warn!("supervisor: FRAME ignored — already running");
+                    return;
+                }
+                let s = settings_store::settings();
+                let fps = (s.fps + 0.5) as u8;
+                status.set_state(State::Single);
+                info!("supervisor: FRAME -> single frame at {fps} fps");
+                let _ = cmds.enqueue(Command::Run { fps, frames: Some(1), shutter: true });
+            }
             UiEvent::Transport(action) => {
                 if crate::rt::door::is_open() {
                     warn!("supervisor: transport ignored — door open (interlock)");
@@ -236,7 +303,7 @@ pub async fn supervisor_task(
                 // 20 ms counter poll (see module docs).
                 // UI events first (same-core, cheap).
                 while let Ok(ev) = UI_EVENTS.try_receive() {
-                    handle_ui(ev, &mut cmds, status, &mut boosting);
+                    handle_ui(ev, &mut cmds, status, &mut boosting, &mut inching);
                 }
 
                 let count = status

@@ -1,15 +1,18 @@
-//! Button inputs (SPECS §9.2): active-low, internal pull-ups.
+//! Button inputs (SPECS §9.2): active-low. Internal pull-ups where the pin
+//! supports them (5/25/26/22/33); the input-only pins 36/39 need external
+//! 10k pull-ups on the bench.
 //!
 //! Debounce model: a press fires on the *first* low sample (fast response —
 //! the core-0 executor quantizes sampling to ~100 ms, so multi-sample press
 //! confirmation would eat normal taps); the button re-arms only after two
 //! consecutive high samples, which swallows contact bounce on release.
 //!
-//! Bench subset: RUN, MENU, ▲, ▼ — the shooting cluster buttons (BOOST,
-//! FRAME, INCH) land with the real panel.
+//! Bench set: RUN, MENU, ▲, ▼ + the shooting cluster (BOOST hold, FRAME,
+//! INCH hold — SPECS §9.3). DOOR is the real door-switch input (GPIO4,
+//! rt::door), bench-wired as a momentary button: hold = closed.
 
 use esp_hal::gpio::{Input, InputConfig, Pull};
-use esp_hal::peripherals::{GPIO22, GPIO25, GPIO26, GPIO5};
+use esp_hal::peripherals::{GPIO22, GPIO25, GPIO26, GPIO33, GPIO36, GPIO39, GPIO5};
 
 /// One debounced button.
 struct Button {
@@ -59,6 +62,9 @@ pub struct Buttons {
     menu: Button,
     up: Button,
     down: Button,
+    boost: Button,
+    frame: Button,
+    inch: Button,
 }
 
 /// One sampling pass' worth of events.
@@ -68,35 +74,53 @@ pub struct Events {
     pub menu_press: bool,
     pub up_press: bool,
     pub down_press: bool,
-    /// Any button still held (for long-press = back detection, SPECS §9.2).
+    pub boost_press: bool,
+    pub frame_press: bool,
+    pub inch_press: bool,
+    /// Still-held states (up/down: long-press = back, SPECS §9.2; boost/
+    /// inch: hold-to-activate, SPECS §9.2).
     pub up_held: bool,
     pub down_held: bool,
+    pub boost_held: bool,
+    pub inch_held: bool,
 }
 
 impl Buttons {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         run: GPIO5<'static>,
         menu: GPIO25<'static>,
         up: GPIO26<'static>,
         down: GPIO22<'static>,
+        boost: GPIO33<'static>,
+        frame: GPIO36<'static>,
+        inch: GPIO39<'static>,
     ) -> Self {
         let cfg = InputConfig::default().with_pull(Pull::Up);
+        // 36/39 are input-only: the pull-up config is ignored in silicon,
+        // so the bench wires external 10k pull-ups on those two.
         Self {
             run: Button::new(Input::new(run, cfg)),
             menu: Button::new(Input::new(menu, cfg)),
             up: Button::new(Input::new(up, cfg)),
             down: Button::new(Input::new(down, cfg)),
+            boost: Button::new(Input::new(boost, cfg)),
+            frame: Button::new(Input::new(frame, cfg)),
+            inch: Button::new(Input::new(inch, cfg)),
         }
     }
 
     /// Boot diagnostic: report each line's level (L = pressed/GND, H = idle).
     pub fn boot_report(&self) {
         log::info!(
-            "ui: buttons run={} menu={} up={} down={}",
+            "ui: buttons run={} menu={} up={} down={} boost={} frame={} inch={}",
             hl(self.run.pin.is_high()),
             hl(self.menu.pin.is_high()),
             hl(self.up.pin.is_high()),
             hl(self.down.pin.is_high()),
+            hl(self.boost.pin.is_high()),
+            hl(self.frame.pin.is_high()),
+            hl(self.inch.pin.is_high()),
         );
     }
 
@@ -106,8 +130,13 @@ impl Buttons {
             menu_press: self.menu.sample(),
             up_press: self.up.sample(),
             down_press: self.down.sample(),
+            boost_press: self.boost.sample(),
+            frame_press: self.frame.sample(),
+            inch_press: self.inch.sample(),
             up_held: self.up.held(),
             down_held: self.down.held(),
+            boost_held: self.boost.held(),
+            inch_held: self.inch.held(),
         }
     }
 }

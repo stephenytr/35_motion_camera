@@ -86,13 +86,23 @@ async fn main(spawner: Spawner) {
             peripherals.GPIO25, // MENU
             peripherals.GPIO26, // ▲
             peripherals.GPIO22, // ▼
+            peripherals.GPIO33, // BOOST
+            peripherals.GPIO36, // FRAME (external 10k pull-up)
+            peripherals.GPIO39, // INCH  (external 10k pull-up)
         )
         .unwrap(),
     );
     spawner.spawn(power::power_task(&fault::EVENTS, &status::STATUS).unwrap());
     spawner.spawn(storage::storage_task(&status::STATUS).unwrap());
     spawner.spawn(wdt::wdt_task(peripherals.RTC_TIMER).unwrap());
-    spawner.spawn(ui::pot::pot_task(peripherals.ADC1, peripherals.GPIO34).unwrap());
+    spawner.spawn(
+        ui::pot::pot_task(
+            peripherals.ADC1,
+            peripherals.GPIO34, // fps pot (ADC1_CH6)
+            peripherals.GPIO35, // exposure pot (ADC1_CH7)
+        )
+        .unwrap(),
+    );
 
     // Core 1: the director has its own executor (ARCHITECTURE §5.1, §6).
     static APP_CORE_STACK: StaticCell<Stack<16384>> = StaticCell::new();
