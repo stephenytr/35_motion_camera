@@ -1,44 +1,56 @@
-//! Button inputs (SPECS §9.2): active-low, internal pull-ups, debounced by
-//! double-sampling in the UI task (~20-40 ms window at 30 ms cadence).
+//! Button inputs (SPECS §9.2): active-low, internal pull-ups.
+//!
+//! Debounce model: a press fires on the *first* low sample (fast response —
+//! the core-0 executor quantizes sampling to ~100 ms, so multi-sample press
+//! confirmation would eat normal taps); the button re-arms only after two
+//! consecutive high samples, which swallows contact bounce on release.
 //!
 //! Bench subset: RUN, MENU, ▲, ▼ — the shooting cluster buttons (BOOST,
 //! FRAME, INCH) land with the real panel.
 
 use esp_hal::gpio::{Input, InputConfig, Pull};
-use esp_hal::peripherals::{GPIO25, GPIO26, GPIO33, GPIO5};
+use esp_hal::peripherals::{GPIO22, GPIO25, GPIO26, GPIO5};
 
-/// One debounced button: a press/release event fires only after two
-/// consecutive identical samples.
+/// One debounced button.
 struct Button {
     pin: Input<'static>,
-    last: bool,
-    state: bool,
+    /// True once a press fired and the button is still in its pressed/
+    /// releasing window (blocks re-trigger until two clean high samples).
+    armed: bool,
+    /// Consecutive high samples since release (re-arm at 2).
+    high_run: u8,
 }
 
 impl Button {
     fn new(pin: Input<'static>) -> Self {
-        let last = !pin.is_high(); // pressed = active-low
         Self {
             pin,
-            last,
-            state: last,
+            armed: true,
+            high_run: 2,
         }
     }
 
-    /// Returns (press, release) events for this sample.
-    fn sample(&mut self) -> (bool, bool) {
-        let raw = !self.pin.is_high();
-        let mut press = false;
-        let mut release = false;
-        if raw == self.last {
-            if raw != self.state {
-                self.state = raw;
-                press = raw;
-                release = !raw;
+    /// Returns a press event for this sample (falls through when the
+    /// button is held — no auto-repeat).
+    fn sample(&mut self) -> bool {
+        let pressed = !self.pin.is_high(); // active-low
+        if pressed {
+            self.high_run = 0;
+            if self.armed {
+                self.armed = false;
+                return true;
+            }
+        } else {
+            self.high_run = self.high_run.saturating_add(1);
+            if self.high_run >= 2 {
+                self.armed = true;
             }
         }
-        self.last = raw;
-        (press, release)
+        false
+    }
+
+    fn held(&self) -> bool {
+        !self.armed && self.high_run == 0
     }
 }
 
@@ -66,7 +78,7 @@ impl Buttons {
         run: GPIO5<'static>,
         menu: GPIO25<'static>,
         up: GPIO26<'static>,
-        down: GPIO33<'static>,
+        down: GPIO22<'static>,
     ) -> Self {
         let cfg = InputConfig::default().with_pull(Pull::Up);
         Self {
@@ -77,18 +89,33 @@ impl Buttons {
         }
     }
 
+    /// Boot diagnostic: report each line's level (L = pressed/GND, H = idle).
+    pub fn boot_report(&self) {
+        log::info!(
+            "ui: buttons run={} menu={} up={} down={}",
+            hl(self.run.pin.is_high()),
+            hl(self.menu.pin.is_high()),
+            hl(self.up.pin.is_high()),
+            hl(self.down.pin.is_high()),
+        );
+    }
+
     pub fn sample(&mut self) -> Events {
-        let (run_press, _) = self.run.sample();
-        let (menu_press, _) = self.menu.sample();
-        let (up_press, _) = self.up.sample();
-        let (down_press, _) = self.down.sample();
         Events {
-            run_press,
-            menu_press,
-            up_press,
-            down_press,
-            up_held: self.up.state,
-            down_held: self.down.state,
+            run_press: self.run.sample(),
+            menu_press: self.menu.sample(),
+            up_press: self.up.sample(),
+            down_press: self.down.sample(),
+            up_held: self.up.held(),
+            down_held: self.down.held(),
         }
+    }
+}
+
+fn hl(high: bool) -> &'static str {
+    if high {
+        "H"
+    } else {
+        "L"
     }
 }

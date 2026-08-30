@@ -47,6 +47,16 @@ impl Lcd1602 {
         None
     }
 
+    /// Boot diagnostic: log every address that ACKs (I2C scan). Helps
+    /// identify wiring problems and non-standard backpack addresses.
+    pub fn scan_bus(i2c: &mut I2c<'static, Blocking>) {
+        for addr in 0x08..=0x77u8 {
+            if i2c.write(addr, &[0x00]).is_ok() {
+                log::info!("ui: I2C device at 0x{addr:02x}");
+            }
+        }
+    }
+
     fn write_raw(&mut self, byte: u8) -> Result<(), I2cError> {
         self.i2c.write(self.addr, &[byte])
     }

@@ -72,7 +72,7 @@ async fn main(spawner: Spawner) {
             peripherals.GPIO5,  // RUN
             peripherals.GPIO25, // MENU
             peripherals.GPIO26, // ▲
-            peripherals.GPIO33, // ▼
+            peripherals.GPIO22, // ▼
         )
         .unwrap(),
     );

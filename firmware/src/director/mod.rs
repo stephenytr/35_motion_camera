@@ -84,17 +84,15 @@ pub async fn director_task(
     tmc.set_dir(true);
     info!("tmc: self-test IOIN version {:#04x}", (ioin >> 24) & 0xFF);
 
-    // M2 demo job: 24 fps, shutter on, infinite — now with the stepper
-    // running. The heartbeat applies it at the first FrameStart.
+    // SPECS §11 power-on: self-test, then IDLE — motion starts on RUN
+    // only. (The M2/M3 bring-up auto-armed a demo job here; with the UI
+    // landed, boot must sit still until commanded.)
     let mut job = JobState {
         fps: DEFAULT_FPS,
         exposure_ms: DEFAULT_EXPOSURE_MS,
         shutter: true,
     };
-    let params = logic::frame_fsm::params_for(job.fps as f32, job.exposure_ms, job.shutter);
-    rt::position::set_direction(Direction::Forward);
-    arm(params, None, Direction::Forward, "boot default job");
-    info!("director: armed default job 24 fps, shutter on, stepper on, infinite");
+    info!("director: idle at boot — press RUN to start");
 
     // Boost ramp base tracks `job.fps`; live-updated every RAMP_TICK while
     // boosting (or coasting back down) so the pull speed slews smoothly

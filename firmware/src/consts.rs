@@ -46,5 +46,5 @@ pub mod ui_pins {
     pub const RUN: u8 = 5;
     pub const MENU: u8 = 25;
     pub const UP: u8 = 26;
-    pub const DOWN: u8 = 33;
+    pub const DOWN: u8 = 22;
 }

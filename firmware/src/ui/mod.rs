@@ -95,7 +95,7 @@ pub async fn ui_task(
     run: esp_hal::peripherals::GPIO5<'static>,
     menu: esp_hal::peripherals::GPIO25<'static>,
     up: esp_hal::peripherals::GPIO26<'static>,
-    down: esp_hal::peripherals::GPIO33<'static>,
+    down: esp_hal::peripherals::GPIO22<'static>,
 ) {
     // Bench I2C pins: SDA=18, SCL=19 (decision log #29) — GPIO 21/22, the
     // chip defaults, are taken (21 = TMC CS).
@@ -104,19 +104,29 @@ pub async fn ui_task(
         .with_sda(sda)
         .with_scl(scl);
 
-    let mut lcd = Lcd1602::detect_address(&mut i2c).map(|addr| {
-        info!("ui: LCD 1602 detected at I2C 0x{addr:02x}");
-        let mut lcd = Lcd1602::new(i2c, addr);
-        match lcd.init() {
-            Ok(()) => Some(lcd),
-            Err(e) => {
-                warn!("ui: LCD init failed: {e:?} — running headless");
-                None
+    let addr = Lcd1602::detect_address(&mut i2c);
+    let mut lcd = match addr {
+        Some(addr) => {
+            info!("ui: LCD 1602 detected at I2C 0x{addr:02x}");
+            let mut lcd = Lcd1602::new(i2c, addr);
+            match lcd.init() {
+                Ok(()) => Some(lcd),
+                Err(e) => {
+                    warn!("ui: LCD init failed: {e:?} — running headless");
+                    None
+                }
             }
         }
-    });
+        None => {
+            // Boot diagnostic: report what actually ACKs on the bus.
+            warn!("ui: no LCD at 0x27/0x3F — scanning I2C bus");
+            Lcd1602::scan_bus(&mut i2c);
+            None
+        }
+    };
 
     let mut buttons = Buttons::new(run, menu, up, down);
+    buttons.boot_report();
     let mut ui = UiState::new();
     info!("ui: up, 16x2 LCD + RUN/MENU/▲/▼, {} ms sampling", SAMPLE_MS);
 
@@ -189,13 +199,11 @@ pub async fn ui_task(
         let screen = render(&ui, status);
         if last_screen != Some(screen) {
             last_screen = Some(screen);
-            if let Some(slot) = lcd.as_mut() {
-                if let Some(display) = slot.as_mut() {
-                    if display.write_screen(&screen.0, &screen.1).is_err() {
-                        // Bus fault (e.g. display yanked): go headless.
-                        warn!("ui: LCD write failed — running headless");
-                        *slot = None;
-                    }
+            if let Some(display) = lcd.as_mut() {
+                if display.write_screen(&screen.0, &screen.1).is_err() {
+                    // Bus fault (e.g. display yanked): go headless.
+                    warn!("ui: LCD write failed — running headless");
+                    lcd = None;
                 }
             }
         }
