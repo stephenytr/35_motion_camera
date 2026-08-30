@@ -82,6 +82,36 @@ pub fn halt() {
     });
 }
 
+/// Request a clean park at the *next* frame boundary (Command::Stop,
+/// ARCHITECTURE §6): forces `remaining = Some(0)`, which `advance()` turns
+/// into a park action the next time it sees `Phase::FrameStart` — i.e. after
+/// the in-flight frame's exposure finishes, never mid-pulldown. Safe to call
+/// from the director task; the cycle state is behind the same
+/// `CriticalSectionMutex` the ISR uses. A no-op if already parked.
+pub fn request_stop() {
+    CYCLE.lock(|cyc_cell| {
+        cyc_cell.borrow_mut().remaining = Some(0);
+    });
+}
+
+/// Live update of the running job's timing params without disturbing phase,
+/// frame count, or the deadman feed cadence — used by the boost ramp
+/// (Command::Boost, ARCHITECTURE §6) to slew fps smoothly. Unlike
+/// `rt::arm_job`, this does **not** kick the heartbeat: it only overwrites
+/// the mailbox, which the ISR already drains every `Phase::FrameStart`
+/// during a running job, so the new params take effect at the next frame
+/// boundary with no re-arm glitch.
+pub fn update_live_params(params: FrameParams) {
+    let timeout_us = (params.period_us.saturating_mul(5) / 2).max(100_000);
+    super::deadman::set_timeout(timeout_us);
+    super::MAILBOX.lock(|m| {
+        *m.borrow_mut() = Some(super::Job {
+            params,
+            frames: None,
+        })
+    });
+}
+
 extern "C" fn heartbeat_isr() {
     HEARTBEAT.lock(|hb_cell| {
         let mut hb_slot = hb_cell.borrow_mut();

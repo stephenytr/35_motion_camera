@@ -3,8 +3,10 @@
 //! director queue entries (ARCHITECTURE §5.1–5.3).
 //!
 //! M1 scope: event-driven loop proving the plumbing — consumes the event
-//! channel, mirrors state into `Status`, and sends the boot-time self-test to
-//! the director over the command queue.
+//! channel, mirrors state into `Status`, and holds the CmdProducer half of
+//! the command queue for real button/UI input in M4. (Run/Stop/Inch/
+//! Rewind/Boost were exercised end-to-end on the bench via a throwaway
+//! script before this landed — see the M3b commit message.)
 
 use embassy_time::{Duration, Timer};
 use log::info;

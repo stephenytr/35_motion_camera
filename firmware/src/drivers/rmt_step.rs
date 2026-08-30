@@ -60,11 +60,41 @@ pub fn init(rmt: RMT<'static>, pin: impl PeripheralOutput<'static>) {
     SLOT.lock(|slot| *slot.borrow_mut() = Some(Slot::Idle(channel)));
 }
 
-/// Rebuild the symbol table from a profile. Only safe while the RMT slot is
-/// idle (the director does this at arm time, between jobs). Returns false
-/// if a transfer is still in flight.
+/// Rebuild the symbol table from a profile. Safe whenever the RMT channel
+/// isn't physically mid-transfer — which is most of any frame period, since
+/// the pulldown transfer (`pull_us`) is much shorter than the frame period
+/// and a running job otherwise sits with a *finished* transaction un-
+/// reclaimed until the next `kick()`. So, like `kick()`, this polls a
+/// `Busy` slot and reclaims it if the transfer has actually completed.
+/// Returns false only if a transfer is genuinely still in flight.
 pub fn build_table(table: &StepTable) -> bool {
-    let ok = SLOT.lock(|slot| matches!(slot.borrow().as_ref(), None | Some(Slot::Idle(_))));
+    let ok = SLOT.lock(|slot| {
+        let mut slot = slot.borrow_mut();
+        match slot.take() {
+            None => true,
+            Some(Slot::Idle(ch)) => {
+                *slot = Some(Slot::Idle(ch));
+                true
+            }
+            Some(Slot::Busy(mut tx)) => {
+                if tx.poll() {
+                    match tx.wait() {
+                        Ok(ch) => {
+                            *slot = Some(Slot::Idle(ch));
+                            true
+                        }
+                        Err((_, ch)) => {
+                            *slot = Some(Slot::Idle(ch));
+                            true
+                        }
+                    }
+                } else {
+                    *slot = Some(Slot::Busy(tx));
+                    false
+                }
+            }
+        }
+    });
     if !ok {
         return false;
     }

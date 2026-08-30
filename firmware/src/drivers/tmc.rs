@@ -55,8 +55,11 @@ const GLOBALSCALER_VALUE: u32 = 128;
 /// TPOWERDOWN: hold current 100 ms after motion stops.
 const TPOWERDOWN_VALUE: u32 = 10;
 
-/// DRV_STATUS fault bits: OLB(31) OLA(30) S2GB(29) S2GA(28) OTPW(27) OT(26).
-const FAULT_MASK: u32 = 0xFC00_0000;
+/// DRV_STATUS fault bits: S2GB(29) S2GA(28) OTPW(27) OT(26). Deliberately
+/// excludes OLA(30)/OLB(31) — open-load detection is unreliable at
+/// standstill and at the reduced IHOLD current (TMC app notes; confirmed
+/// on the bench: OLA/OLB tripped falsely at IHOLD with no wiring fault).
+const FAULT_MASK: u32 = 0x3C00_0000;
 
 /// IOIN version field (bits 31:24): 0x40 = TMC2240, 0x30 = TMC5160.
 const IOIN_VERSION_MASK: u32 = 0xFF00_0000;
