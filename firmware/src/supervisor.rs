@@ -134,12 +134,21 @@ pub async fn supervisor_task(
                         info!("supervisor: track = {:?}", s.track);
                     }
                     MenuItem::Boost => {
-                        *boosting = !*boosting;
+                        // Direction-consistent, like every other adjust:
+                        // ▲ = on, ▼ = off (previously toggled on *either*
+                        // press, so ▼ from OFF could turn boost on).
+                        *boosting = up;
                         status
                             .boost
                             .store(*boosting, core::sync::atomic::Ordering::Relaxed);
                         info!("supervisor: boost = {}", if *boosting { "on" } else { "off" });
                         let _ = cmds.enqueue(Command::Boost(*boosting));
+                    }
+                    MenuItem::Settings => {
+                        let step: i64 = if up { 5 } else { -5 };
+                        s.hold_pct = (s.hold_pct as i64 + step).clamp(0, 100) as u32;
+                        settings_store::set_settings(s);
+                        info!("supervisor: hold = {}%", s.hold_pct);
                     }
                     _ => {}
                 }

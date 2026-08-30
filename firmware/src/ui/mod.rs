@@ -143,10 +143,11 @@ pub async fn ui_task(
             let _ = UI_EVENTS.try_send(UiEvent::RunToggle);
         }
 
-        // Long-press ▲/▼ = back (SPECS §9.2).
-        if ev.up_held && ev.down_held {
+        // Long-press ▲ or ▼ = back (SPECS §9.2: "long-press = back", either
+        // button alone — not a two-finger chord).
+        if ev.up_held || ev.down_held {
             ui.hold += 1;
-        } else if !ev.up_held && !ev.down_held {
+        } else {
             ui.hold = 0;
         }
         if ui.hold >= 10 {
