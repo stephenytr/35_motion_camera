@@ -394,15 +394,12 @@ the alternative is external FRAM/EEPROM on a spare I²C address (hardware change
 
 ## 13. Open Verification Items ([VERIFY] — bring-up checklist)
 
-1. esp-hal exact multicore-executor init shape (CpuControl + second Executor) against
-   current 1.x examples; confirm all-async-drivers-at-P1 defaults.
-2. RMT: non-blocking `transmit()` callable from ISR context; completion status accessor
-   (else documented register peek); 1 MHz tick + slowest ramp symbol fits 15-bit field.
-3. Flash driver cross-core stall behavior — regardless, idle-write rule stands.
+1. ~~esp-hal exact multicore-executor init shape~~ — verified on bench (dual executors, M1+).
+2. ~~RMT: non-blocking `transmit()` callable from ISR; completion status accessor~~ — verified on bench (M3a/M3b: RMT kicks from P2 ISR every frame, poll-and-reclaim works).
+3. Flash driver cross-core stall behavior — regardless, idle-write rule stands. **Pending**: the storage policy/codec is bench-validated against a RAM backend; the real esp-hal flash backend lands once a data partition is confirmed (boot log shows a 24 KB `nvs` partition at 0x9000 as a candidate).
 4. LEDC 25% hold duty calibration against solenoid measurements (§3.5 SPECS).
-5. timg one-shot re-arm latency (back-to-back frames at 36 fps: 27.8 ms period, two
-   heartbeat re-arms — margin is huge; verify no errata).
-6. Embassy time driver availability on both cores.
+5. ~~timg one-shot re-arm latency~~ — verified on bench (24 fps continuous runs; back-to-back re-arms hold frame cadence with no errata).
+6. ~~Embassy time driver availability on both cores~~ — verified on bench (timers/executors on both cores, M1+).
 
 ---
 
@@ -430,3 +427,8 @@ the alternative is external FRAM/EEPROM on a spare I²C address (hardware change
 | 18 | Door interlock (§4.5) debounces by timestamp (`Instant::now()`, backed by TIMG0's free-running LACT counter on esp32) rather than a dedicated one-shot timer — all 4 TIMG general timers are already claimed (#15/#17). No door switch on the bench yet; `rt::door::debug_force` exercises the safe-state/event path directly until hardware lands | signed off 2026-08-29 |
 | 19 | Bench TMC SPI2 pin map deviates from the SPECS HIL map (CS=10/MOSI=11/MISO=13/EN=14/STEP=15/DIR=16) because the WROVER devkit's GPIO 6-11 (flash) and 16-17 (PSRAM) are not broken out: CS=21, MOSI=23, SCK=12, MISO=13, ENN=14, STEP=15 (RMT), DIR=32. Debug strobe LED (#16) moved from GPIO13 to GPIO27 to free MISO | signed off 2026-08-30 |
 | 20 | TMC2240/5160 SPI read quirk: a register read's data is returned one datagram *late* (buffered internally, not same-transaction). `Tmc::read_reg` sends the request then a follow-up transfer to fetch it. Cost a full bring-up session — the symptom (`IOIN=0`, stuck `IFCNT`) was misread as a wiring fault because it was perfectly reproducible, not noisy; confirmed both via the SPI peripheral and an independent bit-bang GPIO probe before the actual cause (protocol timing, not hardware) was found | signed off 2026-08-30 |
+| 21 | Film position accounting (§4.2): RT-plane atomic µstep accumulator (`rt::position`), advanced by the heartbeat ISR per counted frame, direction-aware, clamped at the threading datum. Rewind-to-zero = finite reverse job (2 fps, shutter off, `logic::frame_fsm::rewind_params`, below FPS_MIN by design) with frames precomputed from the position — the Job's `counter_target` (ARCHITECTURE §4.2) is materialized by the director as a frame count, keeping the ISR free of target math. `Job` carries `direction`; director sets the TMC DIR pin and the RT direction to match at arm. Park resets the cycle phase to FrameStart (a leftover ExposeStart counted a phantom frame on the next arm). `CounterZero` event at the datum | signed off 2026-08-30 |
+| 22 | Boost live-updates go through a *params-only* mailbox applied at FrameStart (frame count/phase untouched); `update_live_params` is a no-op while parked. Without the gate, `SetFps` on a parked transport re-armed the deadman with no heartbeat to feed it → guaranteed watchdog reboot (caught on bench). Full-job arms clear stale live params; `halt()` marks the plane parked so the same class of bug can't recur via the door/Jam paths | signed off 2026-08-30 |
+| 23 | Index watchdog bring-up: synthetic edges travel as TEMP commands (`IndexArm`, `IndexEdgeAt`) executed by the director on core 1. Rationale: the watch state is CS-mutex-guarded core-1 data; a core-0 caller held the same mutex concurrently with the core-1 ISR and panicked (`RefCell already borrowed` — critical sections are per-core). Rule going forward: rt CS-mutex statics are touched from core 1 only. The missed-edge check stays silent until the first edge (the film may start anywhere in the sprocket cycle); Jam handling runs inline in the heartbeat ISR because `halt()` self-nests the ISR's own timer lock | signed off 2026-08-30 |
+| 24 | Persistence split: `logic::storage_codec` (versioned record + CRC32 + ping-pong 4 KB sector choice, host-tested), `firmware::settings_store` (runtime shadow), idle-gated policy in the storage task behind a `StorageBackend` trait. Bench backend = RAM sectors (validates codec/policy, not non-volatile). The real esp-hal flash backend targets the partition-table data region next (see §13 item 3) | signed off 2026-08-30 |
+| 25 | TMC S2G/OL status bits (S2GA/S2GB/OLA/OLB) false-trip on the bench at creep speeds, standstill, and IHOLD (TMC app-note behavior). Policy: hard-fault mask = OT|OTPW only; S2G/OL reported as on-change log advisories. Revisit with final motor wiring at HIL | signed off 2026-08-30 |

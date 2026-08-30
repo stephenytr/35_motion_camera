@@ -1,8 +1,8 @@
 //! SPECS/ARCHITECTURE constants plus firmware-only additions.
 
-pub use logic::consts::*;
 
 /// Xtensa interrupt priorities (esp_hal::interrupt::Priority) — ARCHITECTURE §2.
+#[allow(dead_code)]
 pub mod isr_priority {
     /// P3: deadman timer + door interlock (last-line safety).
     pub const SAFETY: u8 = 3;

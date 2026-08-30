@@ -55,11 +55,15 @@ const GLOBALSCALER_VALUE: u32 = 128;
 /// TPOWERDOWN: hold current 100 ms after motion stops.
 const TPOWERDOWN_VALUE: u32 = 10;
 
-/// DRV_STATUS fault bits: S2GB(29) S2GA(28) OTPW(27) OT(26). Deliberately
-/// excludes OLA(30)/OLB(31) — open-load detection is unreliable at
-/// standstill and at the reduced IHOLD current (TMC app notes; confirmed
-/// on the bench: OLA/OLB tripped falsely at IHOLD with no wiring fault).
-const FAULT_MASK: u32 = 0x3C00_0000;
+/// DRV_STATUS hard-fault bits: OT(26) | OTPW(27). Deliberately excludes
+/// S2GA(28)/S2GB(29)/OLA(30)/OLB(31): on the bench these false-trip at
+/// standstill, at the reduced IHOLD current, and at creep speeds (TMC app
+/// notes; confirmed on the bench with no wiring fault). They are reported
+/// as log-only advisories instead. Revisit for HIL with final motor wiring.
+pub const HARD_FAULT_MASK: u32 = 0x0C00_0000;
+
+/// Advisory bits: S2GB(29) S2GA(28) OLB(31) OLA(30) — see HARD_FAULT_MASK.
+pub const ADVISORY_MASK: u32 = 0xF000_0000;
 
 /// IOIN version field (bits 31:24): 0x40 = TMC2240, 0x30 = TMC5160.
 const IOIN_VERSION_MASK: u32 = 0xFF00_0000;
@@ -135,17 +139,6 @@ impl Tmc {
     /// Film direction for the next/current job. `true` = forward.
     pub fn set_dir(&mut self, forward: bool) {
         self.dir.set_level(if forward { self.forward_level } else { !self.forward_level });
-    }
-
-    /// Read DRV_STATUS; return a fault code (status low 16 bits) if any of
-    /// OT / OTPW / S2GA / S2GB / OLA / OLB are set.
-    pub fn poll_status(&mut self) -> Option<u16> {
-        let st = self.read_drv_status();
-        if st & FAULT_MASK != 0 {
-            Some((st & 0xFFFF) as u16)
-        } else {
-            None
-        }
     }
 
     /// Raw IOIN read (SelfTest).

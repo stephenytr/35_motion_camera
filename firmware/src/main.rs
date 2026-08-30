@@ -19,6 +19,7 @@ mod drivers;
 mod fault;
 mod power;
 mod rt;
+mod settings_store;
 mod status;
 mod storage;
 mod supervisor;

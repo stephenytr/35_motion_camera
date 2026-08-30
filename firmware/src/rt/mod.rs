@@ -13,13 +13,18 @@ use embassy_sync::blocking_mutex::CriticalSectionMutex;
 pub mod deadman;
 pub mod door;
 pub mod heartbeat;
+pub mod index;
+pub mod position;
 pub mod shutter;
 
 /// One parameterized job (ARCHITECTURE §4.2), programmed by the director.
-/// `frames: None` runs until stopped.
+/// `frames: None` runs until stopped. `direction` selects motor polarity
+/// and drives the RT position accumulator; the director programs the TMC
+/// DIR pin to match at arm time.
 pub struct Job {
     pub params: logic::frame_fsm::FrameParams,
     pub frames: Option<u32>,
+    pub direction: logic::position::Direction,
 }
 
 /// Param mailbox (ARCHITECTURE §6): director writes a job here; the heartbeat
@@ -36,6 +41,8 @@ pub(crate) static MAILBOX: CriticalSectionMutex<RefCell<Option<Job>>> =
 pub fn arm_job(job: Job) {
     let timeout_us = (job.params.period_us.saturating_mul(5) / 2).max(100_000);
     deadman::set_timeout(timeout_us);
+    // A full job replaces params — stale live updates (boost ramp) are void.
+    heartbeat::clear_live_params();
     MAILBOX.lock(|m| *m.borrow_mut() = Some(job));
     heartbeat::kick();
 }

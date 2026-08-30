@@ -4,8 +4,14 @@
 //! builds the RMT step table from `logic::profile` at job arm, and
 //! translates commands into jobs (logic::frame_fsm params).
 //!
-//! TODO(M3+): Rewind-to-zero (needs logic::counters + index_watch home
-//! wiring, no home sensor on the bench yet), brownout Recover job.
+//! Script jobs (SPECS §10) decompose into job chains issued on
+//! `heartbeat::job_done_take()`: leader marks → leader gap → park, and
+//! track-B setup. A `logic::transport::Transport` model shadows the RT
+//! position accumulator and keeps the pass-end datum for track-B
+//! re-alignment.
+//!
+//! TODO(M3+): brownout Recover job (creep to next index edge — needs the
+//! index sensor), index-present boot self-test.
 
 use embassy_time::{Duration, Timer};
 use esp_hal::time::{Duration as HalDuration, Instant};
@@ -18,13 +24,18 @@ use crate::rt;
 use crate::rt::heartbeat;
 use crate::status::Status;
 use logic::consts::FRAME_USTEPS;
+use logic::position::Direction;
 use logic::ramp::BoostRamp;
+use logic::transport::{ScriptPhase, Transport, LEADER_GAP_FRAMES, LEADER_MARK_FRAMES};
 
 const STATUS_POLL: HalDuration = HalDuration::from_millis(250);
 const RAMP_TICK: HalDuration = HalDuration::from_millis(100);
 const IDLE_YIELD: Duration = Duration::from_millis(5);
 const DEFAULT_FPS: u8 = 24;
 const DEFAULT_EXPOSURE_MS: u32 = 12;
+/// Creep speed for blind advances (leader gap, track-B setup) — SPECS §10
+/// does not pin a number; 6 fps keeps the cadence visibly slow on the bench.
+const CREEP_FPS: f32 = 6.0;
 
 /// Last-armed job settings, kept so Inch/Rewind/Boost can reuse them without
 /// the caller having to repeat fps/exposure/shutter every time.
@@ -35,15 +46,21 @@ struct JobState {
 }
 
 /// Build the RMT step table for `params` and arm it; logs and skips on RMT
-/// busy (ARCHITECTURE §7.2: caught one frame late by design).
-fn arm(params: logic::frame_fsm::FrameParams, frames: Option<u32>, what: &str) {
+/// busy (ARCHITECTURE §7.2: caught one frame late by design). Direction is
+/// applied to the TMC DIR pin *and* the RT position accumulator before the
+/// heartbeat can apply the job.
+fn arm(params: logic::frame_fsm::FrameParams, frames: Option<u32>, dir: Direction, what: &str) {
     let table = logic::profile::build_trapezoid(
         FRAME_USTEPS as usize,
         params.pull_us,
         logic::consts::PULL_ACCEL_FRAC,
     );
     if rmt_step::build_table(&table) {
-        rt::arm_job(rt::Job { params, frames });
+        rt::arm_job(rt::Job {
+            params,
+            frames,
+            direction: dir,
+        });
     } else {
         warn!("director: RMT busy — skipping {what} arm");
     }
@@ -75,7 +92,8 @@ pub async fn director_task(
         shutter: true,
     };
     let params = logic::frame_fsm::params_for(job.fps as f32, job.exposure_ms, job.shutter);
-    arm(params, None, "boot default job");
+    rt::position::set_direction(Direction::Forward);
+    arm(params, None, Direction::Forward, "boot default job");
     info!("director: armed default job 24 fps, shutter on, stepper on, infinite");
 
     // Boost ramp base tracks `job.fps`; live-updated every RAMP_TICK while
@@ -83,8 +101,12 @@ pub async fn director_task(
     // instead of snapping (SPECS §4.2, logic::ramp).
     let mut boost = BoostRamp::new(job.fps as f32, 24.0, 48.0);
 
+    // Transport procedure shadow (SPECS §10).
+    let mut transport = Transport::new();
+
     let mut last_status = Instant::now();
     let mut last_ramp = Instant::now();
+    let mut last_advisory: u32 = 0;
 
     loop {
         match cmds.dequeue() {
@@ -98,8 +120,9 @@ pub async fn director_task(
                 job = JobState { fps, exposure_ms: job.exposure_ms, shutter };
                 boost.set_base(fps as f32);
                 tmc.set_dir(true); // Run always advances film forward
+                rt::position::set_direction(Direction::Forward);
                 let params = logic::frame_fsm::params_for(fps as f32, job.exposure_ms, shutter);
-                arm(params, frames, "Run");
+                arm(params, frames, Direction::Forward, "Run");
             }
             Some(Command::Stop) => {
                 info!("director: Stop — parking at next frame boundary");
@@ -108,30 +131,77 @@ pub async fn director_task(
             Some(Command::Inch { frames }) => {
                 info!("director: Inch {frames} frame(s)");
                 tmc.set_dir(true);
+                rt::position::set_direction(Direction::Forward);
                 let params = logic::frame_fsm::params_for(job.fps as f32, job.exposure_ms, job.shutter);
-                arm(params, Some(frames), "Inch");
+                arm(params, Some(frames), Direction::Forward, "Inch");
             }
             Some(Command::Rewind { to_zero }) => {
-                if to_zero {
-                    // Needs logic::counters + index_watch home wiring — no
-                    // home sensor on the bench yet. Refuse rather than spin
-                    // indefinitely with no stop condition.
-                    warn!("director: Rewind to_zero — not implemented (no home sensor), ignoring");
+                transport.sync_position(rt::position::usteps());
+                let remaining = transport.rewind_plan();
+                if to_zero && remaining == 0 {
+                    info!("director: Rewind to zero — already at datum, nothing to do");
                 } else {
-                    info!("director: Rewind — running reverse until Stop");
+                    let frames = if to_zero { Some(remaining) } else { None };
+                    info!("director: Rewind to_zero={to_zero} frames={frames:?}");
                     tmc.set_dir(false);
-                    let params = logic::frame_fsm::params_for(job.fps as f32, job.exposure_ms, job.shutter);
-                    arm(params, None, "Rewind");
+                    rt::position::set_direction(Direction::Reverse);
+                    arm(
+                        logic::frame_fsm::rewind_params(),
+                        frames,
+                        Direction::Reverse,
+                        "rewind",
+                    );
                 }
+            }
+            Some(Command::LeaderMark) => {
+                info!("director: leader marks — {LEADER_MARK_FRAMES} frames @ {CREEP_FPS:.0} fps, shutter");
+                transport.set_phase(ScriptPhase::LeaderMarks);
+                tmc.set_dir(true);
+                rt::position::set_direction(Direction::Forward);
+                let params =
+                    logic::frame_fsm::params_for(CREEP_FPS, job.exposure_ms, true);
+                arm(params, Some(LEADER_MARK_FRAMES), Direction::Forward, "leader marks");
+            }
+            Some(Command::TrackBSetup) => {
+                transport.sync_position(rt::position::usteps());
+                let frames = transport.track_b_plan();
+                if frames == 0 {
+                    info!("director: TrackBSetup — no pass recorded, nothing to advance");
+                } else {
+                    info!("director: TrackBSetup — advancing {frames} frames to pass end");
+                    transport.set_phase(ScriptPhase::TrackBAdvance);
+                    tmc.set_dir(true);
+                    rt::position::set_direction(Direction::Forward);
+                    let params =
+                        logic::frame_fsm::params_for(CREEP_FPS, job.exposure_ms, false);
+                    arm(params, Some(frames), Direction::Forward, "track B setup");
+                }
+            }
+            Some(Command::IndexArm) => {
+                // TEMP bench hook (see command.rs): runs on core 1 where
+                // the index state's CS mutex is safe.
+                info!("director: index watchdog armed (bench)");
+                rt::index::set_enabled(true);
+            }
+            Some(Command::IndexEdgeAt(usteps)) => {
+                // TEMP bench hook: synthetic index edge at `usteps`.
+                rt::index::debug_edge_at(usteps as i32);
             }
             Some(Command::SetFps(fps)) => {
                 info!("director: SetFps {fps}");
                 job.fps = fps;
                 boost.set_base(fps as f32);
+                // Persist at the next idle boundary (ARCHITECTURE §12).
+                let mut s = crate::settings_store::settings();
+                s.fps = fps as f32;
+                crate::settings_store::set_settings(s);
             }
             Some(Command::SetExposure(ms)) => {
                 info!("director: SetExposure {ms} ms");
                 job.exposure_ms = ms;
+                let mut s = crate::settings_store::settings();
+                s.exposure_ms = ms;
+                crate::settings_store::set_settings(s);
             }
             Some(Command::Boost(on)) => {
                 info!("director: Boost {on}");
@@ -142,18 +212,54 @@ pub async fn director_task(
                 }
             }
             None => {
+                // Script chaining: a parked job means the next chain step.
+                if heartbeat::job_done_take() {
+                    let phase = transport.phase();
+                    transport.sync_position(rt::position::usteps());
+                    match phase {
+                        ScriptPhase::LeaderMarks => {
+                            info!("director: leader marks done — advancing {LEADER_GAP_FRAMES}-frame gap");
+                            transport.set_phase(ScriptPhase::LeaderGap);
+                            tmc.set_dir(true);
+                            rt::position::set_direction(Direction::Forward);
+                            let params =
+                                logic::frame_fsm::params_for(CREEP_FPS, job.exposure_ms, false);
+                            arm(params, Some(LEADER_GAP_FRAMES), Direction::Forward, "leader gap");
+                        }
+                        ScriptPhase::LeaderGap => {
+                            info!("director: leader procedure complete (marks + gap)");
+                        }
+                        ScriptPhase::TrackBAdvance => {
+                            info!("director: track B setup complete");
+                        }
+                        ScriptPhase::Idle => {}
+                    }
+                    transport.on_job_end(rt::position::direction());
+                }
+
                 if last_status.elapsed() >= STATUS_POLL {
                     last_status = Instant::now();
-                    if let Some(code) = tmc.poll_status() {
+                    let st = tmc.read_drv_status();
+                    if st & crate::drivers::tmc::HARD_FAULT_MASK != 0 {
                         warn!(
-                            "director: TMC fault, full DRV_STATUS={:#010x} (code={code:#06x})",
-                            tmc.read_drv_status()
+                            "director: TMC hard fault, DRV_STATUS={st:#010x} (code={:#06x})",
+                            (st >> 16) as u16
                         );
                         rt::safe_state();
-                        let _ = events.try_send(Event::Fault(ErrorCode::Driver(code)));
+                        let _ = events.try_send(Event::Fault(ErrorCode::Driver((st >> 16) as u16)));
+                    } else if st & crate::drivers::tmc::ADVISORY_MASK != 0
+                        && st & crate::drivers::tmc::ADVISORY_MASK != last_advisory
+                    {
+                        // S2G/OL false-positive territory (tmc.rs): log on
+                        // change only, never latch.
+                        last_advisory = st & crate::drivers::tmc::ADVISORY_MASK;
+                        warn!(
+                            "director: TMC advisory S2G/OL bits {:#010x} (log-only)",
+                            last_advisory
+                        );
                     }
                 }
-                if last_ramp.elapsed() >= RAMP_TICK && !boost.at_target() {
+                if last_ramp.elapsed() >= RAMP_TICK && !heartbeat::is_parked() && !boost.at_target() {
                     let dt_s = last_ramp.elapsed().as_micros() as f32 / 1_000_000.0;
                     last_ramp = Instant::now();
                     let fps = boost.step(dt_s);

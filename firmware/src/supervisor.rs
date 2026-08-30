@@ -22,7 +22,14 @@ pub async fn supervisor_task(
     status: &'static Status,
 ) {
     status.set_state(State::Idle);
-    info!("supervisor: up, state = {:?}", status.state());
+    // SPECS §11 power-on self-test, bench scope: report the door interlock
+    // state (the index/battery/self-test legs land with their hardware).
+    info!(
+        "supervisor: up, state = {:?}, door = {}, position = {} frames",
+        status.state(),
+        if crate::rt::door::is_open() { "OPEN" } else { "closed" },
+        crate::rt::position::frames(),
+    );
 
     loop {
         match events.receive().await {
@@ -33,6 +40,11 @@ pub async fn supervisor_task(
             Event::JobComplete => {
                 status.set_state(State::Idle);
                 info!("supervisor: JobComplete -> IDLE");
+            }
+            Event::CounterZero => {
+                // Rewind-to-zero reached the datum (SPECS §10 step 4).
+                status.set_state(State::Idle);
+                info!("supervisor: CounterZero — film at datum");
             }
             Event::DoorOpen => {
                 status.door_open.store(true, core::sync::atomic::Ordering::Relaxed);
@@ -48,8 +60,10 @@ pub async fn supervisor_task(
                 status.fault.store(code.code(), core::sync::atomic::Ordering::Relaxed);
                 info!("supervisor: Fault({code:?}) -> ERROR");
             }
-            Event::CounterZero => info!("supervisor: CounterZero"),
-            Event::IndexTick => info!("supervisor: IndexTick"),
+            Event::IndexTick => {
+                // Sprocket index edge accepted (ARCHITECTURE §4.3) — up to
+                // ~3.6 Hz at 24 fps, so no log line; status-only.
+            }
             Event::SettingsChanged => info!("supervisor: SettingsChanged"),
         }
 

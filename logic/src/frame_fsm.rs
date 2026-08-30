@@ -63,6 +63,24 @@ pub fn params_for(fps: f32, exposure_ms: u32, shutter_enabled: bool) -> FramePar
     }
 }
 
+/// Rewind speed (SPECS §10 step 4): "2 fps equivalent" — one frame of film
+/// reversed per 500 ms. Deliberately below `FPS_MIN`; rewind is a transport
+/// move, not a shot, so it does not go through `params_for`'s clamp.
+pub const REWIND_FPS: f32 = 2.0;
+
+/// Rewind job params: shutter locked closed, zero exposure, one frame of
+/// film per 500 ms.
+pub fn rewind_params() -> FrameParams {
+    let period = period_us(REWIND_FPS);
+    FrameParams {
+        period_us: period,
+        pull_us: pull_us(period),
+        settle_us: SETTLE_US,
+        exp_us: 0,
+        shutter_enabled: false,
+    }
+}
+
 /// Advance the frame FSM one phase. `remaining` is decremented when a frame is
 /// exposed; `None` means run until stopped.
 pub fn advance(phase: Phase, p: &FrameParams, remaining: &mut Option<u32>) -> Actions {
@@ -167,5 +185,24 @@ mod tests {
         assert!(!a.shutter_pull);
         assert_eq!(a.arm_hold_us, None);
         assert_eq!(a.arm_exposure_us, None);
+    }
+
+    #[test]
+    fn rewind_params_match_specs() {
+        let p = rewind_params();
+        assert_eq!(p.period_us, 500_000);
+        assert_eq!(p.pull_us, 275_000); // 55% pulldown window at 2 fps
+        assert!(!p.shutter_enabled);
+        assert_eq!(p.exp_us, 0);
+        // And a full rewind cycle parks: 3 reverse frames end at the datum.
+        let mut remaining = Some(3u32);
+        assert!(!advance(Phase::FrameStart, &p, &mut remaining).park);
+        assert!(!advance(Phase::ExposeStart, &p, &mut remaining).park);
+        assert!(!advance(Phase::FrameStart, &p, &mut remaining).park);
+        assert!(!advance(Phase::ExposeStart, &p, &mut remaining).park);
+        assert!(!advance(Phase::FrameStart, &p, &mut remaining).park);
+        assert!(advance(Phase::ExposeStart, &p, &mut remaining).frame_counted);
+        assert_eq!(remaining, Some(0));
+        assert!(advance(Phase::FrameStart, &p, &mut remaining).park);
     }
 }

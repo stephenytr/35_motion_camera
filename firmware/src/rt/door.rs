@@ -117,6 +117,7 @@ fn apply_state(open: bool) {
 /// safe-state/event path directly instead of the GPIO edge + debounce (that
 /// part is standard `esp-hal` input handling, not custom logic). Removed
 /// once real hardware is on the bench.
+#[allow(dead_code)]
 pub fn debug_force(open: bool) {
     apply_state(open);
 }

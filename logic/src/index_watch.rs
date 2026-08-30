@@ -19,11 +19,18 @@ pub enum IndexVerdict {
 #[derive(Debug, Default)]
 pub struct IndexWatch {
     last_edge_step: i32,
+    /// The missed-edge check only makes sense relative to a *seen* edge;
+    /// before the first edge the film could be anywhere in the 200-step
+    /// sprocket cycle, so `check_frame_end` stays silent until one arrives.
+    seen_edge: bool,
 }
 
 impl IndexWatch {
-    pub fn new() -> Self {
-        Self::default()
+    pub const fn new() -> Self {
+        Self {
+            last_edge_step: 0,
+            seen_edge: false,
+        }
     }
 
     pub fn on_index_edge(&mut self, cumulative_steps: i32) -> IndexVerdict {
@@ -34,10 +41,14 @@ impl IndexWatch {
             return IndexVerdict::Misaligned(dev);
         }
         self.last_edge_step = cumulative_steps;
+        self.seen_edge = true;
         IndexVerdict::Ok
     }
 
     pub fn check_frame_end(&self, cumulative_steps: i32) -> IndexVerdict {
+        if !self.seen_edge {
+            return IndexVerdict::Ok;
+        }
         let overdue = cumulative_steps - self.last_edge_step;
         if overdue > INDEX_STEPS as i32 + INDEX_SLACK_STEPS {
             IndexVerdict::MissedEdge
@@ -78,8 +89,15 @@ mod tests {
 
     #[test]
     fn missed_edge_is_detected_at_frame_end() {
+        // Silent until the first edge: the film may start anywhere in the
+        // sprocket cycle.
         let w = IndexWatch::new();
         assert_eq!(w.check_frame_end(180), IndexVerdict::Ok);
-        assert_eq!(w.check_frame_end(210), IndexVerdict::MissedEdge);
+        assert_eq!(w.check_frame_end(210), IndexVerdict::Ok);
+
+        let mut w = IndexWatch::new();
+        assert_eq!(w.on_index_edge(200), IndexVerdict::Ok);
+        assert_eq!(w.check_frame_end(210), IndexVerdict::Ok);
+        assert_eq!(w.check_frame_end(410), IndexVerdict::MissedEdge);
     }
 }
