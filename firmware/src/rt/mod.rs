@@ -56,7 +56,14 @@ pub fn safe_state() {
         ch.duty().write(|w| unsafe { w.duty().bits(0) });
         ch.conf1().modify(|_, w| w.duty_start().set_bit());
     }
-    // TODO(M3): TMC5160 EN low (ARCHITECTURE §4.6).
+    // TMC2240/5160 ENN high = driver disabled, motor freewheels (SPECS §7.2).
+    // Raw GPIO poke: works pre-`esp_hal::init` and from P3 ISRs.
+    let gpio = esp_hal::peripherals::GPIO::regs();
+    let mask = 1u32 << crate::consts::tmc_pins::EN;
+    unsafe {
+        gpio.enable_w1ts().write(|w| w.bits(mask));
+        gpio.out_w1ts().write(|w| w.bits(mask));
+    }
 }
 
 /// Latched safe state: actuators off *and* the RT plane / watchdog feeder are

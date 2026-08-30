@@ -23,6 +23,9 @@ pub const FRAMES_PER_M: f32 = 1000.0 / FRAME_PITCH_MM;
 
 // --- Frame timing (SPECS §3.5) ---
 pub const SETTLE_US: u32 = 3_000;
+
+/// Fraction of the move spent in each accel/decel ramp (logic::profile).
+pub const PULL_ACCEL_FRAC: f32 = 0.2;
 pub const PULLDOWN_WINDOW_PCT: f32 = 55.0;
 /// [VERIFY] optional guard between settle end and exposure start (SPECS uses 0).
 pub const GUARD_US: u32 = 0;

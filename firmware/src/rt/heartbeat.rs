@@ -118,7 +118,9 @@ extern "C" fn heartbeat_isr() {
 
             // Apply the action record — register writes only, no waits.
             if actions.rmt_kick {
-                // TODO(M3): non-blocking RMT transmit (ARCHITECTURE §3.2)
+                // Non-blocking STEP transmit for this frame's pulldown
+                // (ARCHITECTURE §3.2). Busy → Fault::RmtBusy, cadence continues.
+                crate::drivers::rmt_step::kick();
             }
             if actions.shutter_pull {
                 shutter::pull();

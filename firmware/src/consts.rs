@@ -13,5 +13,25 @@ pub mod isr_priority {
 }
 
 /// HIL timing debug strobe pin (ARCHITECTURE §11): frame strobe + phase marker.
-/// Bench: user LED on GPIO 13, active-high marks the frame phase.
-pub const DEBUG_STROBE_GPIO: u8 = 13;
+/// Bench: user LED, active-high marks the frame phase. Moved from GPIO 13 in
+/// M3 — 13 is the TMC SPI MISO on the bench. Documentation only; main.rs
+/// wires the typed `peripherals.GPIO27` pin directly.
+#[allow(dead_code)]
+pub const DEBUG_STROBE_GPIO: u8 = 27;
+
+/// TMC2240/5160 bench pin map (decision log #19). Deviates from the SPECS
+/// HIL map (CS=10, MOSI=11, MISO=13, EN=14, STEP=15, DIR=16) because a
+/// WROVER devkit's internal flash/PSRAM consumes GPIO 6-11 and 16-17.
+/// Documented here (not type-level: pins are compile-time GPIO types in
+/// main.rs).
+#[allow(dead_code)]
+pub mod tmc_pins {
+    pub const CS: u8 = 21;
+    pub const MOSI: u8 = 23;
+    pub const MISO: u8 = 13;
+    pub const SCK: u8 = 12;
+    /// ENN — active LOW: low = driver enabled, high = disabled/freewheel.
+    pub const EN: u8 = 14;
+    pub const STEP: u8 = 15;
+    pub const DIR: u8 = 32;
+}

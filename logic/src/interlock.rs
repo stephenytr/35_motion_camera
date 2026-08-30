@@ -14,6 +14,7 @@ pub enum ErrorCode {
     RollEnd,
     Watchdog,
     Brownout,
+    RmtBusy,
 }
 
 impl ErrorCode {
@@ -28,6 +29,7 @@ impl ErrorCode {
             ErrorCode::RollEnd => 4,
             ErrorCode::Watchdog => 5,
             ErrorCode::Brownout => 6,
+            ErrorCode::RmtBusy => 7,
         }
     }
 }
