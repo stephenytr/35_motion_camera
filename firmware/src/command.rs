@@ -28,6 +28,10 @@ pub enum Command {
     /// SPECS §10 step 6: advance to the recorded pass-end position at creep
     /// speed, aligning track B with pass 1.
     TrackBSetup,
+    /// Brownout recovery (SPECS §11, ARCHITECTURE §6): creep forward and
+    /// park at the next index edge (frame boundary). Bench-exercised with
+    /// synthetic edges until the sensor lands.
+    Recover,
     /// TEMP bench hooks for the index watchdog (no sensor wired yet). The
     /// director executes them on core 1 — index state is CS-mutex-guarded
     /// core-1 data, so the bench script must not touch it directly from

@@ -34,6 +34,16 @@ static WATCH: CriticalSectionMutex<RefCell<IndexWatch>> =
 /// explicitly for synthetic-edge validation.
 static ENABLED: AtomicBool = AtomicBool::new(false);
 
+/// Recover-job latch (SPECS §11 brownout): when set, the next accepted
+/// index edge requests a park at the frame boundary — the recover creep
+/// job runs with `frames: None`, so this is its stop condition.
+static RECOVER_PENDING: AtomicBool = AtomicBool::new(false);
+
+/// Arm/disarm the recover stop (director, at Recover job start).
+pub fn arm_recover_stop(on: bool) {
+    RECOVER_PENDING.store(on, Ordering::SeqCst);
+}
+
 /// Unused until the index-sensor boot self-test (SPECS §11) lands.
 #[allow(dead_code)]
 pub fn set_enabled(on: bool) {
@@ -80,6 +90,17 @@ pub fn frame_end_check() -> IndexVerdict {
     WATCH.lock(|w| w.borrow().check_frame_end(steps))
 }
 
+/// Shared acceptance path for a good edge (ISR- and task-callable).
+fn accept_edge() {
+    let _ = EVENTS.try_send(Event::IndexTick);
+    if RECOVER_PENDING.swap(false, Ordering::SeqCst) {
+        // Brownout recover: park at the frame boundary (SPECS §11). Safe
+        // from a future P2 sensor ISR — request_stop only takes the cycle
+        // CS mutex, and the heartbeat ISR is the same priority (no nest).
+        crate::rt::heartbeat::request_stop();
+    }
+}
+
 /// A real (or synthetic) index edge at the current commanded position.
 /// The future index-sensor GPIO ISR (P2) calls this; until then the bench
 /// hooks below exercise the identical path.
@@ -88,9 +109,7 @@ pub fn on_edge() {
     let steps = crate::rt::position::usteps() / logic::consts::MICROSTEPS as i32;
     let v = WATCH.lock(|w| w.borrow_mut().on_index_edge(steps));
     match v {
-        IndexVerdict::Ok => {
-            let _ = EVENTS.try_send(Event::IndexTick);
-        }
+        IndexVerdict::Ok => accept_edge(),
         other => apply_verdict(other),
     }
 }
@@ -109,9 +128,7 @@ pub fn debug_edge_at(usteps: i32) {
     let steps = usteps / logic::consts::MICROSTEPS as i32;
     let v = WATCH.lock(|w| w.borrow_mut().on_index_edge(steps));
     match v {
-        IndexVerdict::Ok => {
-            let _ = EVENTS.try_send(Event::IndexTick);
-        }
+        IndexVerdict::Ok => accept_edge(),
         other => apply_verdict(other),
     }
 }

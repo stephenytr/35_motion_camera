@@ -7,9 +7,13 @@ use embassy_sync::channel::Channel;
 
 /// Events from the RT plane / director to the command plane, delivered over an
 /// embassy channel with `try_send` (never blocking from ISR context).
+///
+/// Rare events only (≤ ~1 Hz): high-rate frame counters bypass the channel
+/// entirely and flow through `status::STATUS` atomics, which the supervisor
+/// polls — the channel's critical-section mutex is per-core (decision log
+/// #23), so cross-core sends are only sound at low rates.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Event {
-    FrameDone(u32),
     JobComplete,
     IndexTick,
     DoorOpen,

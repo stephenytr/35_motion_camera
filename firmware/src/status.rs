@@ -37,6 +37,9 @@ impl State {
 
 pub struct Status {
     pub frames_exposed: AtomicU32,
+    /// Cumulative film frames exposed (ISR-incremented, supervisor-polled).
+    /// Distinct from `frames_exposed` (job-local elapsed, UI display).
+    pub exposed_count: AtomicU32,
     pub state: AtomicU32,
     pub door_open: AtomicBool,
     pub vbat_mv: AtomicU32,
@@ -48,6 +51,7 @@ impl Status {
     pub const fn new() -> Self {
         Self {
             frames_exposed: AtomicU32::new(0),
+            exposed_count: AtomicU32::new(0),
             state: AtomicU32::new(State::Idle as u32),
             door_open: AtomicBool::new(false),
             vbat_mv: AtomicU32::new(0),

@@ -226,7 +226,19 @@ extern "C" fn heartbeat_isr() {
                     let _ = EVENTS.try_send(Event::Fault(logic::interlock::ErrorCode::Jam));
                     return;
                 }
-                let _ = EVENTS.try_send(Event::FrameDone(cyc.elapsed));
+                // High-rate counters go straight to atomics, not the event
+                // channel: the channel's critical-section mutex is per-core
+                // (decision log #23), so cross-core try_send from this ISR
+                // races the core-0 consumer and drops messages. The
+                // supervisor polls these at 20 ms instead.
+                crate::status::STATUS
+                    .frames_exposed
+                    .store(cyc.elapsed, core::sync::atomic::Ordering::Relaxed);
+                if actions.shutter_pull {
+                    crate::status::STATUS
+                        .exposed_count
+                        .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                }
             }
 
             if actions.park {

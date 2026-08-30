@@ -177,6 +177,21 @@ pub async fn director_task(
                     arm(params, Some(frames), Direction::Forward, "track B setup");
                 }
             }
+            Some(Command::Recover) => {
+                // Brownout recovery (SPECS §11): creep forward and park at
+                // the next index edge — the edge acceptance path requests
+                // the park via rt::index. `frames: None`: the edge is the
+                // stop condition. Needs the sensor; bench exercises it
+                // with synthetic edges (IndexEdgeAt).
+                info!("director: Recover — creeping to next index edge");
+                transport.sync_position(rt::position::usteps());
+                tmc.set_dir(true);
+                rt::position::set_direction(Direction::Forward);
+                rt::index::arm_recover_stop(true);
+                let params =
+                    logic::frame_fsm::params_for(CREEP_FPS, job.exposure_ms, false);
+                arm(params, None, Direction::Forward, "recover creep");
+            }
             Some(Command::IndexArm) => {
                 // TEMP bench hook (see command.rs): runs on core 1 where
                 // the index state's CS mutex is safe.
@@ -265,7 +280,21 @@ pub async fn director_task(
                     let fps = boost.step(dt_s);
                     let params =
                         logic::frame_fsm::params_for(fps, job.exposure_ms, job.shutter);
-                    heartbeat::update_live_params(params);
+                    // The step table must track the slewing cadence, or the
+                    // transfer overruns the frame at faster fps (RmtBusy).
+                    // build_table's poll-and-reclaim makes this safe mid-job.
+                    let table = logic::profile::build_trapezoid(
+                        FRAME_USTEPS as usize,
+                        params.pull_us,
+                        logic::consts::PULL_ACCEL_FRAC,
+                    );
+                    if rmt_step::build_table(&table) {
+                        heartbeat::update_live_params(params);
+                    } else {
+                        // Transfer in flight — retry on the next tick; the
+                        // ramp is far slower than the tick rate.
+                        warn!("director: ramp tick deferred (RMT transfer in flight)");
+                    }
                 } else if last_ramp.elapsed() >= RAMP_TICK {
                     last_ramp = Instant::now();
                 }
