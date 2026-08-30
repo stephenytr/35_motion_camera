@@ -29,6 +29,7 @@ pub async fn supervisor_task(
     events: &'static EventChannel,
     mut cmds: CmdProducer,
     status: &'static Status,
+    brownout: bool,
 ) {
     status.set_state(State::Idle);
     // SPECS §11 power-on self-test, bench scope: report the door interlock
@@ -39,6 +40,18 @@ pub async fn supervisor_task(
         if crate::rt::door::is_open() { "OPEN" } else { "closed" },
         crate::rt::position::frames(),
     );
+
+    // Brownout auto-recover (SPECS §11): `main` flags a VDD-dip reset; if
+    // the door is shut, creep to the next index edge and park — same job a
+    // manual Recover command runs. JobComplete below returns us to IDLE.
+    if brownout {
+        if crate::rt::door::is_open() {
+            warn!("supervisor: brownout recovery skipped — door open");
+        } else {
+            warn!("supervisor: brownout detected — auto-recovering (creep to next index edge)");
+            let _ = cmds.enqueue(Command::Recover);
+        }
+    }
 
     // Cumulative exposed count of the active track (SPECS §9.4). Local to
     // this task; persisted to the settings store at job boundaries.

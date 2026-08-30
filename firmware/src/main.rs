@@ -49,6 +49,18 @@ async fn main(spawner: Spawner) {
         log::error!("boot: fault marker {code:#010x} — ERROR WD");
     }
 
+    // Brownout auto-recover (SPECS §11, ARCHITECTURE §6): a VDD dip resets
+    // the whole chip (no time to run the deadman marker), so the only
+    // evidence is the RTC_CNTL reset-reason register. If that's what put us
+    // here, the supervisor auto-issues Recover once it's up instead of
+    // requiring a manual command — the same creep-to-next-index-edge job
+    // used for a manual recovery.
+    let brownout = esp_hal::rtc_cntl::reset_reason(esp_hal::system::Cpu::ProCpu)
+        == Some(esp_hal::rtc_cntl::SocResetReason::SysBrownOut);
+    if brownout {
+        log::warn!("boot: brownout reset detected — auto-recover pending");
+    }
+
     // Command queue: one-time split into the two single-owner halves.
     let cmd_q: &'static mut command::CmdQueue =
         command::CMD_QUEUE_CELL.init(command::CmdQueue::new());
@@ -61,8 +73,9 @@ async fn main(spawner: Spawner) {
     esp_rtos::start(timg1.timer1, peripherals.FROM_CPU_INTR0);
 
     // Command plane tasks on core 0 (ARCHITECTURE §5.1).
-    spawner
-        .spawn(supervisor::supervisor_task(&fault::EVENTS, cmd_tx, &status::STATUS).unwrap());
+    spawner.spawn(
+        supervisor::supervisor_task(&fault::EVENTS, cmd_tx, &status::STATUS, brownout).unwrap(),
+    );
     spawner.spawn(
         ui::ui_task(
             &status::STATUS,

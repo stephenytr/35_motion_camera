@@ -10,8 +10,10 @@
 //! position accumulator and keeps the pass-end datum for track-B
 //! re-alignment.
 //!
-//! TODO(M3+): brownout Recover job (creep to next index edge — needs the
-//! index sensor), index-present boot self-test.
+//! `Command::Recover` (brownout: creep to next index edge and park) is
+//! auto-issued by the supervisor on a brownout reset reason (main.rs) as
+//! well as reachable manually; bench-exercised with synthetic index edges
+//! until the sensor lands. TODO(M3+): index-present boot self-test.
 
 use embassy_time::{Duration, Timer};
 use esp_hal::time::{Duration as HalDuration, Instant};
