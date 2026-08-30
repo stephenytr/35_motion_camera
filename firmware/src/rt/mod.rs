@@ -63,6 +63,11 @@ pub fn safe_state() {
         ch.duty().write(|w| unsafe { w.duty().bits(0) });
         ch.conf1().modify(|_, w| w.duty_start().set_bit());
     }
+    // Lock-free latch: any already-fired shutter one-shot whose ISR is
+    // still pending must not re-energize the driver after this (the stale
+    // ISR window — rt::shutter module docs). The heartbeat's next arm
+    // re-arms it.
+    shutter::latch_disarmed();
     // TMC2240/5160 ENN high = driver disabled, motor freewheels (SPECS §7.2).
     // Raw GPIO poke: works pre-`esp_hal::init` and from P3 ISRs.
     let gpio = esp_hal::peripherals::GPIO::regs();

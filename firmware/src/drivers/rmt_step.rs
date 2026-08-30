@@ -67,10 +67,16 @@ pub fn init(rmt: RMT<'static>, pin: impl PeripheralOutput<'static>) {
 /// reclaimed until the next `kick()`. So, like `kick()`, this polls a
 /// `Busy` slot and reclaims it if the transfer has actually completed.
 /// Returns false only if a transfer is genuinely still in flight.
+///
+/// The buffer write happens *inside* the slot lock: `kick()` runs at P2 and
+/// can preempt this task mid-write, and a kick that reads a half-updated
+/// table would transmit one corrupt frame. Holding the lock for the write
+/// masks interrupts for a few µs — acceptable, the pair timers are armed
+/// separately and the heartbeat cadence is millisecond-scale.
 pub fn build_table(table: &StepTable) -> bool {
-    let ok = SLOT.lock(|slot| {
+    SLOT.lock(|slot| {
         let mut slot = slot.borrow_mut();
-        match slot.take() {
+        let free = match slot.take() {
             None => true,
             Some(Slot::Idle(ch)) => {
                 *slot = Some(Slot::Idle(ch));
@@ -93,22 +99,22 @@ pub fn build_table(table: &StepTable) -> bool {
                     false
                 }
             }
+        };
+        if !free {
+            return false;
         }
-    });
-    if !ok {
-        return false;
-    }
-    unsafe {
-        for (i, &dt) in table.dt_us[..table.len].iter().enumerate() {
-            let dt = dt.max(2);
-            let hi = (dt / 2) as u16;
-            let lo = (dt - hi as u32) as u16;
-            STEP_BUFFER[i] = PulseCode::new(Level::High, hi, Level::Low, lo);
+        unsafe {
+            for (i, &dt) in table.dt_us[..table.len].iter().enumerate() {
+                let dt = dt.max(2);
+                let hi = (dt / 2) as u16;
+                let lo = (dt - hi as u32) as u16;
+                STEP_BUFFER[i] = PulseCode::new(Level::High, hi, Level::Low, lo);
+            }
+            STEP_BUFFER[table.len] = PulseCode::end_marker();
         }
-        STEP_BUFFER[table.len] = PulseCode::end_marker();
-    }
-    STEP_LEN.store((table.len + 1) as u32, Ordering::Relaxed);
-    true
+        STEP_LEN.store((table.len + 1) as u32, Ordering::Relaxed);
+        true
+    })
 }
 
 /// Start the next frame's transfer (heartbeat ISR at FrameStart).

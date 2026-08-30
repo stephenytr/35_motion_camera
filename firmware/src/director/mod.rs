@@ -260,7 +260,14 @@ pub async fn director_task(
                             "director: TMC hard fault, DRV_STATUS={st:#010x} (code={:#06x})",
                             (st >> 16) as u16
                         );
+                        // Full RT-plane stop, matching the door/JAM paths:
+                        // driving the actuators off alone leaves the
+                        // heartbeat cycling the shutter and counting
+                        // exposures while the supervisor sits in ERROR.
                         rt::safe_state();
+                        rt::heartbeat::halt();
+                        rt::shutter::disarm();
+                        rt::deadman::disarm();
                         let _ = events.try_send(Event::Fault(ErrorCode::Driver((st >> 16) as u16)));
                     } else if st & crate::drivers::tmc::ADVISORY_MASK != 0
                         && st & crate::drivers::tmc::ADVISORY_MASK != last_advisory
