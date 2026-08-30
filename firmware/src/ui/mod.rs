@@ -290,7 +290,7 @@ fn write_item_value(
 ) {
     match item {
         MenuItem::Fps => {
-            let _ = write!(l2, "{:.1} fps", settings.fps);
+            let _ = write!(l2, "{} fps", settings.fps);
         }
         MenuItem::Exposure => {
             let _ = write!(l2, "{} ms", settings.exposure_ms);
@@ -327,7 +327,7 @@ fn write_item_value_short(
 ) {
     match item {
         MenuItem::Fps => {
-            let _ = write!(l2, "{:.1}", settings.fps);
+            let _ = write!(l2, "{}", settings.fps);
         }
         MenuItem::Exposure => {
             let _ = write!(l2, "{}ms", settings.exposure_ms);

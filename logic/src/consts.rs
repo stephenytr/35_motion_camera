@@ -36,7 +36,7 @@ pub const SHUTTER_HOLD_PCT: u32 = 25;
 // --- FPS / boost (SPECS §4.2) ---
 pub const FPS_MIN: f32 = 3.0;
 pub const FPS_MAX: f32 = 36.0;
-pub const FPS_STEP: f32 = 0.5;
+pub const FPS_STEP: f32 = 1.0;
 pub const BOOST_MULT: f32 = 1.5;
 pub const RAMP_UP_DEFAULT: f32 = 24.0;
 pub const RAMP_DOWN_DEFAULT: f32 = 48.0;

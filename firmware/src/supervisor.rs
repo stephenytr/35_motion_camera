@@ -99,10 +99,15 @@ pub async fn supervisor_task(
                 match item {
                     MenuItem::Fps => {
                         let step = if up { logic::consts::FPS_STEP } else { -logic::consts::FPS_STEP };
-                        s.fps = (s.fps + step).clamp(logic::consts::FPS_MIN, logic::consts::FPS_MAX);
+                        // Round before stepping: heals legacy 0.5-step
+                        // values persisted by older builds (director SetFps
+                        // already writes integers back, but the display and
+                        // the motor must never disagree about the step).
+                        s.fps = ((s.fps + 0.5) as u8 as f32 + step)
+                            .clamp(logic::consts::FPS_MIN, logic::consts::FPS_MAX);
                         settings_store::set_settings(s);
-                        info!("supervisor: fps = {:.1}", s.fps);
-                        let _ = cmds.enqueue(Command::SetFps((s.fps + 0.5) as u8));
+                        info!("supervisor: fps = {:.0}", s.fps);
+                        let _ = cmds.enqueue(Command::SetFps(s.fps as u8));
                     }
                     MenuItem::Exposure => {
                         let next = s.exposure_ms as i64 + if up { 1 } else { -1 };
