@@ -40,8 +40,13 @@ pub struct Status {
     /// Cumulative film frames exposed (ISR-incremented, supervisor-polled).
     /// Distinct from `frames_exposed` (job-local elapsed, UI display).
     pub exposed_count: AtomicU32,
+    /// The supervisor's adjusted exposure counter (rewind-decremented,
+    /// film-end-checked) — published here for the UI display.
+    pub counter_exposed: AtomicU32,
     pub state: AtomicU32,
     pub door_open: AtomicBool,
+    /// Boost active (supervisor-owned; UI displays it).
+    pub boost: AtomicBool,
     pub vbat_mv: AtomicU32,
     /// 0 = none, else ErrorCode discriminant + payload (ARCHITECTURE §5.3).
     pub fault: AtomicU32,
@@ -52,8 +57,10 @@ impl Status {
         Self {
             frames_exposed: AtomicU32::new(0),
             exposed_count: AtomicU32::new(0),
+            counter_exposed: AtomicU32::new(0),
             state: AtomicU32::new(State::Idle as u32),
             door_open: AtomicBool::new(false),
+            boost: AtomicBool::new(false),
             vbat_mv: AtomicU32::new(0),
             fault: AtomicU32::new(0),
         }

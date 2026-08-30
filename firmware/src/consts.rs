@@ -35,3 +35,16 @@ pub mod tmc_pins {
     pub const STEP: u8 = 15;
     pub const DIR: u8 = 32;
 }
+
+/// Bench UI pin map (decision log #29): 1602A LCD on I2C0 + four buttons.
+/// SDA/SCL are 18/19 because the chip-default 21/22 pair is taken (21 =
+/// TMC CS). All buttons active-low with internal pull-ups.
+#[allow(dead_code)]
+pub mod ui_pins {
+    pub const LCD_SDA: u8 = 18;
+    pub const LCD_SCL: u8 = 19;
+    pub const RUN: u8 = 5;
+    pub const MENU: u8 = 25;
+    pub const UP: u8 = 26;
+    pub const DOWN: u8 = 33;
+}

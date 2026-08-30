@@ -5,6 +5,7 @@
 //! TODO: `buttons` — async GPIO with task-side debounce
 //! TODO: `storage` — embedded-storage flash, ping-pong 4 KB, CRC32 records
 
+pub mod lcd1602;
 pub mod rmt_step;
 pub mod shutter;
 pub mod tmc;

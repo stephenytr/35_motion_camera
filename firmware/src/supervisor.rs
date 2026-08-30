@@ -17,6 +17,8 @@ use crate::command::{Command, CmdProducer};
 use crate::fault::{Event, EventChannel};
 use crate::settings_store;
 use crate::status::{State, Status};
+use crate::ui::{TransportAction, UiEvent, UI_EVENTS};
+use logic::menu::MenuItem;
 use logic::settings::Track;
 
 /// Counter-poll cadence (roll-end must catch within a frame at any fps).
@@ -41,6 +43,7 @@ pub async fn supervisor_task(
     // Cumulative exposed count of the active track (SPECS §9.4). Local to
     // this task; persisted to the settings store at job boundaries.
     let mut exposed: u32 = 0;
+    let mut boosting: bool = false;
     // Last-seen values for delta detection.
     let mut last_pos: u32 = crate::rt::position::frames();
     let mut last_count: u32 = status.exposed_count.load(core::sync::atomic::Ordering::Relaxed);
@@ -51,6 +54,103 @@ pub async fn supervisor_task(
         match (s.mode, s.track) {
             (logic::settings::TrackMode::Dual, Track::B) => 1,
             _ => 0,
+        }
+    }
+
+    /// UI command translation (ARCHITECTURE §8): validate against the
+    /// interlock matrix, then enqueue the director command.
+    fn handle_ui(
+        ev: UiEvent,
+        cmds: &mut CmdProducer,
+        status: &'static Status,
+        boosting: &mut bool,
+    ) {
+        match ev {
+            UiEvent::RunToggle => {
+                if crate::rt::door::is_open() {
+                    warn!("supervisor: RUN ignored — door open (interlock)");
+                    return;
+                }
+                if crate::rt::heartbeat::is_parked() {
+                    let s = settings_store::settings();
+                    let fps = (s.fps + 0.5) as u8;
+                    info!("supervisor: RUN -> Run {fps} fps, infinite");
+                    let _ = cmds.enqueue(Command::Run { fps, frames: None, shutter: true });
+                } else {
+                    info!("supervisor: RUN -> Stop");
+                    let _ = cmds.enqueue(Command::Stop);
+                }
+            }
+            UiEvent::Adjust { item, up } => {
+                let mut s = settings_store::settings();
+                match item {
+                    MenuItem::Fps => {
+                        let step = if up { logic::consts::FPS_STEP } else { -logic::consts::FPS_STEP };
+                        s.fps = (s.fps + step).clamp(logic::consts::FPS_MIN, logic::consts::FPS_MAX);
+                        settings_store::set_settings(s);
+                        info!("supervisor: fps = {:.1}", s.fps);
+                        let _ = cmds.enqueue(Command::SetFps((s.fps + 0.5) as u8));
+                    }
+                    MenuItem::Exposure => {
+                        let next = s.exposure_ms as i64 + if up { 1 } else { -1 };
+                        s.exposure_ms = next
+                            .clamp(
+                                logic::consts::EXPOSURE_MIN_MS as i64,
+                                logic::consts::EXPOSURE_MAX_MS as i64,
+                            )
+                            as u32;
+                        settings_store::set_settings(s);
+                        info!("supervisor: exposure = {} ms", s.exposure_ms);
+                        let _ = cmds.enqueue(Command::SetExposure(s.exposure_ms));
+                    }
+                    MenuItem::Roll => {
+                        s.roll_frames = if up {
+                            s.roll_frames.saturating_add(10)
+                        } else {
+                            s.roll_frames.saturating_sub(10).max(1)
+                        };
+                        settings_store::set_settings(s);
+                        info!("supervisor: roll = {} frames", s.roll_frames);
+                    }
+                    MenuItem::Track => {
+                        s.track = match s.track {
+                            Track::A => Track::B,
+                            Track::B => Track::A,
+                        };
+                        settings_store::set_settings(s);
+                        info!("supervisor: track = {:?}", s.track);
+                    }
+                    MenuItem::Boost => {
+                        *boosting = !*boosting;
+                        status
+                            .boost
+                            .store(*boosting, core::sync::atomic::Ordering::Relaxed);
+                        info!("supervisor: boost = {}", if *boosting { "on" } else { "off" });
+                        let _ = cmds.enqueue(Command::Boost(*boosting));
+                    }
+                    _ => {}
+                }
+            }
+            UiEvent::Transport(action) => {
+                if crate::rt::door::is_open() {
+                    warn!("supervisor: transport ignored — door open (interlock)");
+                    return;
+                }
+                match action {
+                    TransportAction::Leader => {
+                        info!("supervisor: transport -> track leader");
+                        let _ = cmds.enqueue(Command::LeaderMark);
+                    }
+                    TransportAction::Rewind => {
+                        info!("supervisor: transport -> rewind to zero");
+                        let _ = cmds.enqueue(Command::Rewind { to_zero: true });
+                    }
+                    TransportAction::TrackBSetup => {
+                        info!("supervisor: transport -> track B setup");
+                        let _ = cmds.enqueue(Command::TrackBSetup);
+                    }
+                }
+            }
         }
     }
 
@@ -91,12 +191,20 @@ pub async fn supervisor_task(
             Ok(Event::SettingsChanged) => info!("supervisor: SettingsChanged"),
             Err(_) => {
                 // 20 ms counter poll (see module docs).
+                // UI events first (same-core, cheap).
+                while let Ok(ev) = UI_EVENTS.try_receive() {
+                    handle_ui(ev, &mut cmds, status, &mut boosting);
+                }
+
                 let count = status
                     .exposed_count
                     .load(core::sync::atomic::Ordering::Relaxed);
                 if count != last_count {
                     exposed = exposed.saturating_add(count - last_count);
                     last_count = count;
+                    status
+                        .counter_exposed
+                        .store(exposed, core::sync::atomic::Ordering::Relaxed);
                     // Roll end (SPECS §11): finish the current frame, park.
                     if exposed >= settings_store::settings().roll_frames {
                         let r = logic::interlock::evaluate(logic::interlock::Condition::FilmEnd);
@@ -114,6 +222,9 @@ pub async fn supervisor_task(
                 let pos = crate::rt::position::frames();
                 if pos < last_pos {
                     exposed = exposed.saturating_sub(last_pos - pos);
+                    status
+                        .counter_exposed
+                        .store(exposed, core::sync::atomic::Ordering::Relaxed);
                 }
                 last_pos = pos;
             }

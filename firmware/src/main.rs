@@ -63,7 +63,19 @@ async fn main(spawner: Spawner) {
     // Command plane tasks on core 0 (ARCHITECTURE §5.1).
     spawner
         .spawn(supervisor::supervisor_task(&fault::EVENTS, cmd_tx, &status::STATUS).unwrap());
-    spawner.spawn(ui::ui_task(&status::STATUS).unwrap());
+    spawner.spawn(
+        ui::ui_task(
+            &status::STATUS,
+            peripherals.I2C0,
+            esp_hal::gpio::AnyPin::from(peripherals.GPIO18), // LCD SDA
+            esp_hal::gpio::AnyPin::from(peripherals.GPIO19), // LCD SCL
+            peripherals.GPIO5,  // RUN
+            peripherals.GPIO25, // MENU
+            peripherals.GPIO26, // ▲
+            peripherals.GPIO33, // ▼
+        )
+        .unwrap(),
+    );
     spawner.spawn(power::power_task(&fault::EVENTS, &status::STATUS).unwrap());
     spawner.spawn(storage::storage_task(&status::STATUS).unwrap());
     spawner.spawn(wdt::wdt_task(peripherals.RTC_TIMER).unwrap());
