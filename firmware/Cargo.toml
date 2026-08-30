@@ -18,6 +18,7 @@ embassy-sync = "0.8"
 embassy-time = "0.5.0"
 esp-rtos = { version = "0.4", features = ["embassy", "esp32"] }
 esp-hal = { version = "~1.2.0-rc.0", features = ["esp32", "unstable"] }
+esp-storage = { version = "0.10.0", features = ["critical-section"] }
 esp-backtrace = { version = "0.20", features = ["esp32", "println"] }
 esp-bootloader-esp-idf = { version = "0.6", features = ["esp32"] }
 esp-println = { version = "0.18", default-features = false, features = ["esp32", "log-04", "uart"] }
