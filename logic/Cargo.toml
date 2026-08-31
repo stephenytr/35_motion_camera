@@ -1,0 +1,7 @@
+[package]
+name = "logic"
+version.workspace = true
+edition.workspace = true
+description = "Pure, host-testable logic for the 35mm 1.5-perf camera firmware (no hardware)"
+
+[dependencies]
