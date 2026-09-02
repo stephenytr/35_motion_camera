@@ -1,12 +1,13 @@
-//! UI task (core 0): buttons, menu model (logic::menu), bench 16×2 LCD
-//! (SPECS §9.1's final unit is an SSD1306 OLED — rendering is behind this
-//! task either way), and UI events toward the supervisor (ARCHITECTURE §8:
-//! the supervisor validates against the interlock matrix and translates to
-//! director commands; the UI never enqueues commands itself).
+//! UI task (core 0): buttons, menu model (logic::menu), the SSD1306 OLED
+//! (SPECS §9.1 — rendering is behind this task either way), and UI events
+//! toward the supervisor (ARCHITECTURE §8: the supervisor validates against
+//! the interlock matrix and translates to director commands; the UI never
+//! enqueues commands itself).
 //!
-//! Bench controls: RUN, MENU, ▲, ▼. MENU enters the item view; ▲/▼
-//! navigate (main), adjust (item), or cycle transport actions; long ▲/▼
-//! backs out. RUN toggles run/stop from any view.
+//! Bench controls: RUN, MENU, ▲, ▼ + shooting cluster (BOOST/FRAME/INCH).
+//! MENU enters the item view; ▲/▼ navigate (main), adjust (item), or cycle
+//! transport actions; long ▲/▼ backs out. RUN toggles run/stop from any
+//! view.
 
 pub mod buttons;
 pub mod pot;
@@ -23,7 +24,7 @@ use esp_hal::peripherals::I2C0;
 use heapless::String;
 use log::{info, warn};
 
-use crate::drivers::lcd1602::{Lcd1602, COLS};
+use crate::drivers::oled::{Oled, COLS};
 use crate::settings_store;
 use crate::status::Status;
 use logic::menu::{MenuItem, MenuState};
@@ -112,30 +113,30 @@ pub async fn ui_task(
     frame: esp_hal::peripherals::GPIO36<'static>,
     inch: esp_hal::peripherals::GPIO39<'static>,
 ) {
-    // Bench I2C pins: SDA=18, SCL=19 (decision log #29) — GPIO 21/22, the
-    // chip defaults, are taken (21 = TMC CS).
+    // I2C pins: SDA=18, SCL=19 (decision log #29) — the chip-default 21/22
+    // pair is taken (21 = takeup DIR, 22 = ▼).
     let mut i2c = I2c::new(i2c0, I2cConfig::default())
         .expect("i2c init")
         .with_sda(sda)
         .with_scl(scl);
 
-    let addr = Lcd1602::detect_address(&mut i2c);
-    let mut lcd = match addr {
+    let addr = Oled::probe(&mut i2c);
+    let mut display = match addr {
         Some(addr) => {
-            info!("ui: LCD 1602 detected at I2C 0x{addr:02x}");
-            let mut lcd = Lcd1602::new(i2c, addr);
-            match lcd.init() {
-                Ok(()) => Some(lcd),
-                Err(e) => {
-                    warn!("ui: LCD init failed: {e:?} — running headless");
+            info!("ui: SSD1306 OLED detected at I2C 0x{addr:02x}");
+            let mut display = Oled::new(i2c, addr);
+            match display.init() {
+                Ok(()) => Some(display),
+                Err(_) => {
+                    warn!("ui: OLED init failed — running headless");
                     None
                 }
             }
         }
         None => {
             // Boot diagnostic: report what actually ACKs on the bus.
-            warn!("ui: no LCD at 0x27/0x3F — scanning I2C bus");
-            Lcd1602::scan_bus(&mut i2c);
+            warn!("ui: no OLED at 0x3C/0x3D — scanning I2C bus");
+            Oled::scan_bus(&mut i2c);
             None
         }
     };
@@ -144,7 +145,7 @@ pub async fn ui_task(
     buttons.boot_report();
     let mut ui = UiState::new();
     info!(
-        "ui: up, 16x2 LCD + RUN/MENU/▲/▼/BOOST/FRAME/INCH, {} ms sampling",
+        "ui: up, 128x64 OLED + RUN/MENU/▲/▼/BOOST/FRAME/INCH, {} ms sampling",
         SAMPLE_MS
     );
 
@@ -235,11 +236,11 @@ pub async fn ui_task(
         let screen = render(&ui, status);
         if last_screen != Some(screen) {
             last_screen = Some(screen);
-            if let Some(display) = lcd.as_mut() {
-                if display.write_screen(&screen.0, &screen.1).is_err() {
+            if let Some(disp) = display.as_mut() {
+                if disp.write_screen(&screen.0, &screen.1).is_err() {
                     // Bus fault (e.g. display yanked): go headless.
-                    warn!("ui: LCD write failed — running headless");
-                    lcd = None;
+                    warn!("ui: OLED write failed — running headless");
+                    display = None;
                 }
             }
         }

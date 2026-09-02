@@ -9,7 +9,7 @@ logic.workspace = true
 # Build requires the espup xtensa toolchain (see .cargo/config.toml).
 # TODO(ARCHITECTURE §5.1): pin embassy-executor / embassy-time via esp-hal embassy
 # features at bring-up [VERIFY compatible versions].
-# TODO(ARCHITECTURE §7): heapless, ssd1306, embedded-graphics, embedded-storage.
+# Display stack (SPECS §9.1): ssd1306 + embedded-graphics on the OLED.
 log = "0.4"
 heapless = "0.9"
 static_cell = "2.1"
@@ -22,3 +22,6 @@ esp-storage = { version = "0.10.0", features = ["critical-section"] }
 esp-backtrace = { version = "0.20", features = ["esp32", "println"] }
 esp-bootloader-esp-idf = { version = "0.6", features = ["esp32"] }
 esp-println = { version = "0.18", default-features = false, features = ["esp32", "log-04", "uart"] }
+embedded-graphics = "0.8"
+ssd1306 = "0.9"
+display-interface-i2c = "0.5"

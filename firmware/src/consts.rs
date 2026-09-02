@@ -13,36 +13,36 @@ pub mod isr_priority {
 }
 
 /// HIL timing debug strobe pin (ARCHITECTURE §11): frame strobe + phase marker.
-/// Bench: user LED, active-high marks the frame phase. Moved from GPIO 13 in
-/// M3 — 13 is the TMC SPI MISO on the bench. Documentation only; main.rs
-/// wires the typed `peripherals.GPIO27` pin directly.
+/// Documentation only; main.rs wires the typed pin directly.
 #[allow(dead_code)]
 pub const DEBUG_STROBE_GPIO: u8 = 27;
 
-/// TMC2240/5160 bench pin map (decision log #19). Deviates from the SPECS
-/// HIL map (CS=10, MOSI=11, MISO=13, EN=14, STEP=15, DIR=16) because a
-/// WROVER devkit's internal flash/PSRAM consumes GPIO 6-11 and 16-17.
-/// Documented here (not type-level: pins are compile-time GPIO types in
-/// main.rs).
+/// TMC2209 × 2 bench pin map (decision log #32): both drivers run in pin
+/// mode (STEP/DIR/EN; MS jumpers + Vref on the boards). The transport axis
+/// keeps the old 2240 STEP/DIR/EN pins (15/32/14); the takeup reuses the
+/// pins the retired SPI interface freed (23/21/12). A WROVER devkit's
+/// internal flash/PSRAM consumes GPIO 6-11 and 16-17. Documented here
+/// (not type-level: pins are compile-time GPIO types in main.rs).
 #[allow(dead_code)]
-pub mod tmc_pins {
-    pub const CS: u8 = 21;
-    pub const MOSI: u8 = 23;
-    pub const MISO: u8 = 13;
-    pub const SCK: u8 = 12;
+pub mod tmc2209_pins {
     /// ENN — active LOW: low = driver enabled, high = disabled/freewheel.
-    pub const EN: u8 = 14;
-    pub const STEP: u8 = 15;
-    pub const DIR: u8 = 32;
+    pub const TRANSPORT_EN: u8 = 14;
+    pub const TRANSPORT_STEP: u8 = 15;
+    pub const TRANSPORT_DIR: u8 = 32;
+    pub const TAKEUP_EN: u8 = 12;
+    /// Takeup STEP is an LEDC pulse train (channel 1), not RMT.
+    pub const TAKEUP_STEP: u8 = 23;
+    pub const TAKEUP_DIR: u8 = 21;
 }
 
-/// Bench UI pin map (decision log #29): 1602A LCD on I2C0 + four buttons.
-/// SDA/SCL are 18/19 because the chip-default 21/22 pair is taken (21 =
-/// TMC CS). All buttons active-low with internal pull-ups.
+/// Bench UI pin map (decision log #29/#31): SSD1306 OLED on I2C0 + seven
+/// buttons + two pots. SDA/SCL are 18/19 (the chip-default 21/22 pair is
+/// taken by the takeup DIR / ▼). All buttons active-low with internal
+/// pull-ups except the input-only 36/39.
 #[allow(dead_code)]
 pub mod ui_pins {
-    pub const LCD_SDA: u8 = 18;
-    pub const LCD_SCL: u8 = 19;
+    pub const OLED_SDA: u8 = 18;
+    pub const OLED_SCL: u8 = 19;
     pub const RUN: u8 = 5;
     pub const MENU: u8 = 25;
     pub const UP: u8 = 26;
@@ -55,4 +55,11 @@ pub mod ui_pins {
     /// Pots (decision log #30): B10K dividers on ADC1.
     pub const POT_FPS: u8 = 34;
     pub const POT_EXPOSURE: u8 = 35;
+}
+
+/// Shutter MOSFET gate (drivers::shutter): LEDC high-speed channel 0
+/// (20 kHz peak-and-hold waveform), 10k gate pulldown on the bench.
+#[allow(dead_code)]
+pub mod shutter_pins {
+    pub const GATE: u8 = 27;
 }

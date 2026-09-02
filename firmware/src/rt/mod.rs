@@ -68,13 +68,19 @@ pub fn safe_state() {
     // ISR window — rt::shutter module docs). The heartbeat's next arm
     // re-arms it.
     shutter::latch_disarmed();
-    // TMC2240/5160 ENN high = driver disabled, motor freewheels (SPECS §7.2).
-    // Raw GPIO poke: works pre-`esp_hal::init` and from P3 ISRs.
+    // Both TMC2209 ENN pins high = drivers disabled, motors freewheel
+    // (SPECS §7.2). Raw GPIO poke: works pre-`esp_hal::init` and from P3
+    // ISRs.
     let gpio = esp_hal::peripherals::GPIO::regs();
-    let mask = 1u32 << crate::consts::tmc_pins::EN;
-    unsafe {
-        gpio.enable_w1ts().write(|w| w.bits(mask));
-        gpio.out_w1ts().write(|w| w.bits(mask));
+    for pin in [
+        crate::consts::tmc2209_pins::TRANSPORT_EN,
+        crate::consts::tmc2209_pins::TAKEUP_EN,
+    ] {
+        let mask = 1u32 << pin;
+        unsafe {
+            gpio.enable_w1ts().write(|w| w.bits(mask));
+            gpio.out_w1ts().write(|w| w.bits(mask));
+        }
     }
 }
 

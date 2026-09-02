@@ -17,6 +17,12 @@ pub const FRAME_USTEPS: u32 = FRAME_FULL_STEPS * MICROSTEPS;
 pub const INDEX_STEPS: u32 = FULL_STEPS_PER_REV;
 pub const INDEX_SLACK_STEPS: i32 = 2;
 
+/// Takeup feedforward: µsteps/frame for the takeup spool at a ~20 mm core
+/// diameter. Derivation: film pitch 7.125 mm/frame ÷ (π × 20 mm) turns per
+/// frame × 200 full steps × 16 µsteps ≈ 363. The takeup has a friction
+/// clutch (compliance), so this is a ballpark rate, not a phase lock.
+pub const TAKEUP_USTEPS_PER_FRAME: u32 = 363;
+
 // --- Frame geometry (SPECS §2.1) ---
 pub const FRAME_PITCH_MM: f32 = PERF_PITCH_MM * HALF_PERFS_PER_FRAME as f32 / 2.0;
 pub const FRAMES_PER_M: f32 = 1000.0 / FRAME_PITCH_MM;

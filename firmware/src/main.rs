@@ -120,28 +120,28 @@ async fn main(spawner: Spawner) {
             rt::heartbeat::init(timg0.timer0);
             rt::shutter::init(timg1.timer0, timg0.timer1);
             rt::door::init(peripherals.IO_MUX, peripherals.GPIO4);
-            drivers::shutter::init(
-                esp_hal::ledc::Ledc::new(peripherals.LEDC),
-                peripherals.GPIO27, // bench strobe LED (moved off GPIO13/MISO)
-            );
+            let ledc = esp_hal::ledc::Ledc::new(peripherals.LEDC);
+            drivers::shutter::init(&ledc, peripherals.GPIO27); // MOSFET gate
             drivers::rmt_step::init(peripherals.RMT, peripherals.GPIO15);
+            drivers::takeup::init_timer_and_channel(peripherals.GPIO23); // takeup STEP
 
-            // TMC2240/5160 over SPI2, owned by the director (ARCHITECTURE §6).
-            let tmc = drivers::tmc::Tmc::new(
-                peripherals.SPI2,
-                peripherals.GPIO21, // CS
-                peripherals.GPIO23, // MOSI
-                peripherals.GPIO12, // SCK
-                peripherals.GPIO13, // MISO
-                peripherals.GPIO14, // ENN
-                peripherals.GPIO32, // DIR
+            // Two TMC2209 axes in pin mode (decision log #32): transport
+            // keeps the old STEP/DIR/EN pins; takeup reuses the retired SPI
+            // pins for EN/DIR/STEP (STEP = LEDC pulse train).
+            let tmc = drivers::tmc2209::Tmc2209::new(
+                peripherals.GPIO14, // transport EN
+                peripherals.GPIO32, // transport DIR
+            );
+            let takeup = drivers::takeup::Takeup::new(
+                peripherals.GPIO12, // takeup EN
+                peripherals.GPIO21, // takeup DIR
             );
 
             static EXECUTOR: StaticCell<esp_rtos::embassy::Executor> = StaticCell::new();
             let executor = EXECUTOR.init(esp_rtos::embassy::Executor::new());
             executor.run(|spawner| {
                 spawner.spawn(
-                    director::director_task(&fault::EVENTS, cmd_rx, &status::STATUS, tmc)
+                    director::director_task(&fault::EVENTS, cmd_rx, &status::STATUS, tmc, takeup)
                         .unwrap(),
                 );
             });

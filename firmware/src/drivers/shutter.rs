@@ -9,8 +9,11 @@
 //! register writes mirroring the HAL's `set_duty` math (2^5 range, `<< 4`
 //! field shift), so they are safe from the P2 ISRs that own the waveform.
 //!
-//! Bench: drives the user LED on GPIO 13 so the waveform is visible
-//! (bright 4 ms pull, dim hold, off) without a scope.
+//! Hardware: an N-channel MOSFET gate driven by the channel pin (active-
+//! high FET — no bench inversion anymore); the solenoid sits between VM and
+//! the drain with a flyback diode (1N4001, cathode to VM) across it. The
+//! 10k gate pulldown keeps the solenoid off while the ESP32 boots; at 0%
+//! duty the output idles low, so the spring-fails-closed path holds.
 
 use esp_hal::gpio::interconnect::PeripheralOutput;
 use esp_hal::gpio::DriveMode;
@@ -26,16 +29,9 @@ use esp_hal::time::Rate;
 const DUTY_MAX: u32 = 31;
 const DUTY_SHIFT: u32 = 4; // integer part of the duty field starts at bit 4
 
-/// Bench LED on GPIO 13 is active-low (lit when the pin is LOW), so the
-/// output shows the complement of the true FET waveform. The driver's
-/// `pull`/`hold`/`off` duty table stays true to ARCHITECTURE §3.3 (FET is
-/// active-high); only the register write is inverted for the bench. Remove
-/// this inversion when the real shutter FET lands.
-const BENCH_INVERT: bool = true;
-
 /// One-time setup on core 1: LEDC timer at 20 kHz (5-bit duty) + channel on
 /// `pin`, starting released (0%). Wrappers are dropped; config is in hardware.
-pub fn init(ledc: Ledc<'static>, pin: impl PeripheralOutput<'static>) {
+pub fn init(ledc: &Ledc<'static>, pin: impl PeripheralOutput<'static>) {
     let mut t = ledc.timer::<HighSpeed>(timer::Number::Timer0);
     t.configure(timer::config::Config {
         duty: timer::config::Duty::Duty5Bit,
@@ -60,9 +56,8 @@ pub fn init(ledc: Ledc<'static>, pin: impl PeripheralOutput<'static>) {
 /// compare when `CONF1.DUTY_START` is pulsed (auto-cleared). Without the
 /// pulse, duty writes are silently ignored.
 fn set_duty_raw(duty_value: u32) {
-    let v = if BENCH_INVERT { DUTY_MAX - duty_value } else { duty_value };
     let ch = esp_hal::peripherals::LEDC::regs().hsch(0);
-    ch.duty().write(|w| unsafe { w.duty().bits(v << DUTY_SHIFT) });
+    ch.duty().write(|w| unsafe { w.duty().bits(duty_value << DUTY_SHIFT) });
     ch.conf1().modify(|_, w| w.duty_start().set_bit());
 }
 
