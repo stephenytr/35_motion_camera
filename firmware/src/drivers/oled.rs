@@ -19,9 +19,10 @@ use ssd1306::{I2CDisplayInterface, Ssd1306};
 
 /// Columns per line (8 px/char × 16 = 128 px).
 pub const COLS: u8 = 16;
+/// Number of text lines (4 × 13 px rows fit the 64 px height).
+pub const ROWS: usize = 4;
 /// Line baselines for FONT_8X13 (height 13 px).
-const LINE1_Y: i32 = 15;
-const LINE2_Y: i32 = 47;
+const LINE_YS: [i32; ROWS] = [14, 27, 40, 53];
 
 const ADDR_PRIMARY: u8 = 0x3C;
 const ADDR_ALT: u8 = 0x3D;
@@ -66,22 +67,18 @@ impl Oled {
         self.disp.init().map_err(|_| ())
     }
 
-    /// Render both UI lines (fixed-width ASCII) and flush.
-    pub fn write_screen(&mut self, l1: &[u8; COLS as usize], l2: &[u8; COLS as usize]) -> Result<(), ()> {
+    /// Render the UI lines (fixed-width ASCII) and flush.
+    pub fn write_screen(&mut self, lines: &[[u8; COLS as usize]; ROWS]) -> Result<(), ()> {
         let style = MonoTextStyle::new(&FONT_8X13, BinaryColor::On);
         self.disp.clear_buffer();
-        let _ = Text::new(
-            core::str::from_utf8(l1).unwrap_or(""),
-            Point::new(0, LINE1_Y),
-            style,
-        )
-        .draw(&mut self.disp);
-        let _ = Text::new(
-            core::str::from_utf8(l2).unwrap_or(""),
-            Point::new(0, LINE2_Y),
-            style,
-        )
-        .draw(&mut self.disp);
+        for (i, line) in lines.iter().enumerate() {
+            let _ = Text::new(
+                core::str::from_utf8(line).unwrap_or(""),
+                Point::new(0, LINE_YS[i]),
+                style,
+            )
+            .draw(&mut self.disp);
+        }
         self.disp.flush().map_err(|_| ())
     }
 }

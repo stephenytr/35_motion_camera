@@ -1,13 +1,22 @@
 //! UI task (core 0): buttons, menu model (logic::menu), the SSD1306 OLED
-//! (SPECS §9.1 — rendering is behind this task either way), and UI events
-//! toward the supervisor (ARCHITECTURE §8: the supervisor validates against
-//! the interlock matrix and translates to director commands; the UI never
-//! enqueues commands itself).
+//! (SPECS §9.1), and UI events toward the supervisor (ARCHITECTURE §8: the
+//! supervisor validates against the interlock matrix and translates to
+//! director commands; the UI never enqueues commands itself).
 //!
-//! Bench controls: RUN, MENU, ▲, ▼ + shooting cluster (BOOST/FRAME/INCH).
-//! MENU enters the item view; ▲/▼ navigate (main), adjust (item), or cycle
-//! transport actions; long ▲/▼ backs out. RUN toggles run/stop from any
-//! view.
+//! Display layout (4 lines × 16 chars, FONT_8X13):
+//! ```text
+//!  24fps  15.7ms     cadence + effective shutter + B (boosting)
+//! F 12/228 A         exposed/roll + active track
+//! P 0045  IDLE       film position + state word
+//! >FPS 24            menu cursor / edit line / transport action
+//! ```
+//! Lines 1-3 are always the live status; line 4 is the level-dependent
+//! context ('>' browsing, '*' editing).
+//!
+//! Bench controls: RUN, MENU, ▲, ▼ + shooting cluster (BOOST always live;
+//! FRAME/INCH behind the frame-inch-buttons feature). MENU enters the item
+//! view; ▲/▼ navigate (main), adjust (item), or cycle transport actions;
+//! long ▲/▼ backs out. RUN toggles run/stop from any view.
 
 pub mod buttons;
 pub mod pot;
@@ -24,7 +33,7 @@ use esp_hal::peripherals::I2C0;
 use heapless::String;
 use log::{info, warn};
 
-use crate::drivers::oled::{Oled, COLS};
+use crate::drivers::oled::{Oled, COLS, ROWS};
 use crate::settings_store;
 use crate::status::Status;
 use logic::menu::{MenuItem, MenuState};
@@ -154,7 +163,7 @@ pub async fn ui_task(
     );
 
     let mut ticker = Ticker::every(Duration::from_millis(SAMPLE_MS));
-    let mut last_screen: Option<([u8; COLS as usize], [u8; COLS as usize])> = None;
+    let mut last_screen: Option<Screen> = None;
     let mut boost_prev = false;
     #[cfg(feature = "frame-inch-buttons")]
     let mut inch_prev = false;
@@ -248,7 +257,7 @@ pub async fn ui_task(
         if last_screen != Some(screen) {
             last_screen = Some(screen);
             if let Some(disp) = display.as_mut() {
-                if disp.write_screen(&screen.0, &screen.1).is_err() {
+                if disp.write_screen(&screen).is_err() {
                     // Bus fault (e.g. display yanked): go headless.
                     warn!("ui: OLED write failed — running headless");
                     display = None;
@@ -270,132 +279,144 @@ fn line1<const N: usize>(s: &str) -> [u8; N] {
     buf
 }
 
-/// Render the current view into two 16-wide ASCII lines.
-fn render(ui: &UiState, status: &Status) -> ([u8; COLS as usize], [u8; COLS as usize]) {
-    let settings = settings_store::settings();
-    let mut l1: String<{ COLS as usize }> = String::new();
-    let mut l2: String<{ COLS as usize }> = String::new();
+/// One rendered frame: 4 fixed-width ASCII lines (see the module docs for
+/// the layout).
+pub type Screen = [[u8; COLS as usize]; ROWS];
 
+/// Render the current view into four 16-wide ASCII lines. Lines 1-3 are the
+/// persistent status (cadence/shutter, counters, position/state); line 4 is
+/// the menu context (cursor preview while browsing, the value being edited,
+/// or the selected transport action).
+fn render(ui: &UiState, status: &Status) -> Screen {
+    let settings = settings_store::settings();
+
+    // L1: cadence + effective shutter time + boost flag. The exposure shown
+    // is what the shutter will actually do at the current cadence (the
+    // requested value is clamped to the frame period — showing the raw
+    // setting was a display-vs-reality lie, audit finding #5).
+    let fps = (settings.fps + 0.5) as u32;
+    let eff_ms = logic::frame_fsm::params_for(settings.fps, settings.exposure_ms, true)
+        .exp_us as f32
+        / 1000.0;
+    let boost = if status.boost.load(Ordering::Relaxed) { "B" } else { " " };
+    let mut l1: String<{ COLS as usize }> = String::new();
+    let _ = write!(l1, "{fps:>3}fps {eff_ms:>5.1}ms {boost}");
+
+    // L2: exposure counter / roll length + active track.
+    let track = match settings.track {
+        logic::settings::Track::A => "A",
+        logic::settings::Track::B => "B",
+    };
+    let mut l2: String<{ COLS as usize }> = String::new();
+    let _ = write!(
+        l2,
+        "F{:>3}/{} {}",
+        status.counter_exposed.load(Ordering::Relaxed),
+        settings.roll_frames,
+        track
+    );
+
+    // L3: film position from the datum + state word.
+    let state_word = if crate::rt::safe_active() {
+        "SAFE"
+    } else if status.door_open.load(Ordering::Relaxed) {
+        "DOOR"
+    } else if status.fault.load(Ordering::Relaxed) != 0 {
+        "ERR"
+    } else if !crate::rt::heartbeat::is_parked() {
+        "RUN"
+    } else {
+        "IDLE"
+    };
+    let mut l3: String<{ COLS as usize }> = String::new();
+    let _ = write!(l3, "P{:>5} {:>4}", crate::rt::position::frames(), state_word);
+
+    // L4: menu context.
+    let mut l4: String<{ COLS as usize }> = String::new();
     match ui.level {
         Level::Main => {
-            // Status line (unchanged content, minus the roll count — freed
-            // up to fit the state word without truncating).
-            let fps = (settings.fps + 0.5) as u32;
-            let state_word = if crate::rt::safe_active() {
-                "SAFE"
-            } else if status.door_open.load(Ordering::Relaxed) {
-                "DOOR"
-            } else if status.fault.load(Ordering::Relaxed) != 0 {
-                "ERR"
-            } else if !crate::rt::heartbeat::is_parked() {
-                "RUN"
-            } else {
-                "IDLE"
-            };
-            let _ = write!(
-                l1,
-                "{:>3}fps F{:03} {:4}",
-                fps,
-                status.counter_exposed.load(Ordering::Relaxed),
-                state_word
-            );
             // Live cursor preview: ▲/▼ moves this, so the selected item is
-            // always visible *before* MENU commits to editing it — no more
-            // guessing where the cursor landed.
+            // always visible *before* MENU commits to editing it.
             let item = ui.menu.current();
-            let _ = write!(l2, ">{} ", short_title(item));
-            write_item_value_short(&mut l2, item, &settings, status);
+            let _ = write!(l4, ">{} ", short_title(item));
+            write_item_value_short(&mut l4, item, &settings, status, eff_ms);
         }
         Level::Item => {
-            let item = ui.menu.current();
             // '*' (vs. the '>' cursor at Main) marks that ▲/▼ now edit the
             // value instead of moving the selection.
-            let _ = write!(l1, "*{}", item.title());
-            write_item_value(&mut l2, item, &settings, status);
+            let item = ui.menu.current();
+            let _ = write!(l4, "*{} ", short_title(item));
+            write_item_value_short(&mut l4, item, &settings, status, eff_ms);
         }
         Level::Transport => {
-            let _ = write!(l1, "TRANSPORT");
             let action = TRANSPORT_ACTIONS[ui.transport_idx];
             let name = match action {
-                TransportAction::Leader => "Track Leader",
-                TransportAction::Rewind => "Rewind",
-                TransportAction::TrackBSetup => "Track B Setup",
+                TransportAction::Leader => "LEAD",
+                TransportAction::Rewind => "RWD",
+                TransportAction::TrackBSetup => "T-B",
             };
-            let _ = write!(l2, "{}", name);
+            let _ = write!(l4, ">XPORT {} ", name);
         }
     }
 
-    (line1(l1.as_str()), line1(l2.as_str()))
+    [
+        line1(l1.as_str()),
+        line1(l2.as_str()),
+        line1(l3.as_str()),
+        line1(l4.as_str()),
+    ]
 }
 
-/// Detailed value line for the Item ("editing") view.
-fn write_item_value(
-    l2: &mut String<{ COLS as usize }>,
-    item: MenuItem,
-    settings: &logic::settings::Settings,
-    status: &Status,
-) {
-    match item {
-        MenuItem::Fps => {
-            let _ = write!(l2, "{} fps", settings.fps);
-        }
-        MenuItem::Exposure => {
-            let _ = write!(l2, "{} ms", settings.exposure_ms);
-        }
-        MenuItem::Roll => {
-            let _ = write!(l2, "{} frames", settings.roll_frames);
-        }
-        MenuItem::Track => {
-            let _ = write!(l2, "{:?}/{:?}", settings.mode, settings.track);
-        }
-        MenuItem::Boost => {
-            let _ = write!(l2, "{}", if status.boost.load(Ordering::Relaxed) { "ON" } else { "OFF" });
-        }
-        MenuItem::Transport => {
-            let _ = write!(l2, "MENU to enter");
-        }
-        MenuItem::Settings => {
-            let _ = write!(l2, "hold {}%", settings.hold_pct);
-        }
-        MenuItem::About => {
-            let _ = write!(l2, "35mm 1.5P v1");
-        }
-    }
-}
-
-/// Compact value preview for the Main ("browse") cursor line — always short
-/// enough to fit next to the ">{short_title} " prefix on 16 columns, unlike
-/// `write_item_value`'s detailed text.
+/// Compact value for the context line — always short enough to fit next to
+/// the ">ITEM "/"*ITEM " prefix on 16 columns. `eff_ms` is the effective
+/// (clamped) shutter time at the current cadence: EXPOSURE shows
+/// "requested>effective" so a pot value the frame period can't honor is
+/// visibly clamped rather than silently ignored.
 fn write_item_value_short(
-    l2: &mut String<{ COLS as usize }>,
+    l: &mut String<{ COLS as usize }>,
     item: MenuItem,
     settings: &logic::settings::Settings,
     status: &Status,
+    eff_ms: f32,
 ) {
     match item {
         MenuItem::Fps => {
-            let _ = write!(l2, "{}", settings.fps);
+            let _ = write!(l, "{}", settings.fps);
         }
         MenuItem::Exposure => {
-            let _ = write!(l2, "{}ms", settings.exposure_ms);
+            let _ = write!(l, "{}>{}", settings.exposure_ms, EffDisplay(eff_ms));
         }
         MenuItem::Roll => {
-            let _ = write!(l2, "{}", settings.roll_frames);
+            let _ = write!(l, "{}", settings.roll_frames);
         }
         MenuItem::Track => {
-            let _ = write!(l2, "{:?}", settings.track);
+            let _ = write!(l, "{:?}", settings.track);
         }
         MenuItem::Boost => {
-            let _ = write!(l2, "{}", if status.boost.load(Ordering::Relaxed) { "ON" } else { "OFF" });
+            let _ = write!(l, "{}", if status.boost.load(Ordering::Relaxed) { "ON" } else { "OFF" });
         }
         MenuItem::Transport => {
-            let _ = write!(l2, "->");
+            let _ = write!(l, "MENU");
         }
         MenuItem::Settings => {
-            let _ = write!(l2, "{}%", settings.hold_pct);
+            let _ = write!(l, "{}%", settings.hold_pct);
         }
         MenuItem::About => {
-            let _ = write!(l2, "v1");
+            let _ = write!(l, "v1");
+        }
+    }
+}
+
+/// Formats the effective shutter time without a trailing ".0" (16 columns
+/// are tight, and heapless `write!` can't pick precision per magnitude).
+struct EffDisplay(f32);
+
+impl core::fmt::Display for EffDisplay {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        if self.0 >= 100.0 {
+            write!(f, "{:.0}ms", self.0)
+        } else {
+            write!(f, "{:.1}ms", self.0)
         }
     }
 }
