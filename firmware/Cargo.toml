@@ -4,6 +4,14 @@ version.workspace = true
 edition.workspace = true
 description = "ESP32-S3 firmware for the 35mm 1.5-perf camera (esp-hal, no_std)"
 
+[features]
+# FRAME (GPIO36) / INCH (GPIO39) are input-only pins needing external 10k
+# pull-ups; without them wired the lines float low and phantom-fire. This
+# feature gates their event handling — enable once the pull-ups are wired:
+#   cargo build --release --features frame-inch-buttons
+default = []
+frame-inch-buttons = []
+
 [dependencies]
 logic.workspace = true
 # Build requires the espup xtensa toolchain (see .cargo/config.toml).

@@ -54,9 +54,13 @@ pub enum UiEvent {
     SetExposure(u32),
     /// BOOST held/released (SPECS §9.2: hold = boost; live-ramped mid-take).
     BoostHold(bool),
-    /// INCH held/released (hold = inch).
+    /// INCH held/released (hold = inch). Gated behind the
+    /// `frame-inch-buttons` feature (GPIO39 needs an external pull-up).
+    #[allow(dead_code)]
     InchHold(bool),
-    /// FRAME pressed: run exactly one frame.
+    /// FRAME pressed: run exactly one frame. Gated behind the
+    /// `frame-inch-buttons` feature (GPIO36 needs an external pull-up).
+    #[allow(dead_code)]
     Frame,
 }
 
@@ -152,6 +156,7 @@ pub async fn ui_task(
     let mut ticker = Ticker::every(Duration::from_millis(SAMPLE_MS));
     let mut last_screen: Option<([u8; COLS as usize], [u8; COLS as usize])> = None;
     let mut boost_prev = false;
+    #[cfg(feature = "frame-inch-buttons")]
     let mut inch_prev = false;
 
     loop {
@@ -159,12 +164,24 @@ pub async fn ui_task(
 
         let ev = buttons.sample();
 
-        // Shooting cluster is always live (SPECS §9.3), like RUN.
+        // Shooting cluster is always live (SPECS §9.3), like RUN. FRAME and
+        // INCH are feature-gated: their pins (36/39) are input-only and
+        // float low without external pull-ups, so an unwired bench
+        // phantom-fires them at boot (see Cargo.toml features).
         if ev.run_press {
             let _ = UI_EVENTS.try_send(UiEvent::RunToggle);
         }
-        if ev.frame_press {
-            let _ = UI_EVENTS.try_send(UiEvent::Frame);
+        #[cfg(feature = "frame-inch-buttons")]
+        {
+            if ev.frame_press {
+                let _ = UI_EVENTS.try_send(UiEvent::Frame);
+            }
+            if ev.inch_press {
+                let _ = UI_EVENTS.try_send(UiEvent::InchHold(true));
+            } else if inch_prev && !ev.inch_held {
+                let _ = UI_EVENTS.try_send(UiEvent::InchHold(false));
+            }
+            inch_prev = ev.inch_held;
         }
         if ev.boost_press {
             let _ = UI_EVENTS.try_send(UiEvent::BoostHold(true));
@@ -172,12 +189,6 @@ pub async fn ui_task(
             let _ = UI_EVENTS.try_send(UiEvent::BoostHold(false));
         }
         boost_prev = ev.boost_held;
-        if ev.inch_press {
-            let _ = UI_EVENTS.try_send(UiEvent::InchHold(true));
-        } else if inch_prev && !ev.inch_held {
-            let _ = UI_EVENTS.try_send(UiEvent::InchHold(false));
-        }
-        inch_prev = ev.inch_held;
 
         // Long-press ▲ or ▼ = back (SPECS §9.2: "long-press = back", either
         // button alone — not a two-finger chord).
