@@ -55,11 +55,13 @@ pub struct Status {
     pub fault: AtomicU32,
     /// RMT STEP diagnostics (ISR/director-written on core 1, polled on core
     /// 0): transfer kicks, kicks that found the slot still busy (RmtBusy
-    /// raised), and table rebuilds that found a transfer genuinely in
-    /// flight (the "ramp tick deferred" case).
+    /// raised), table rebuilds that found a transfer genuinely in flight
+    /// (the "ramp tick deferred" case), and S3 mid-transfer threshold
+    /// refills serviced by the P2 ISR.
     pub rmt_kicks: AtomicU32,
     pub rmt_busy: AtomicU32,
     pub rmt_poll_false: AtomicU32,
+    pub rmt_refills: AtomicU32,
 }
 
 impl Status {
@@ -77,6 +79,7 @@ impl Status {
             rmt_kicks: AtomicU32::new(0),
             rmt_busy: AtomicU32::new(0),
             rmt_poll_false: AtomicU32::new(0),
+            rmt_refills: AtomicU32::new(0),
         }
     }
 
