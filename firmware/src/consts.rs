@@ -20,16 +20,26 @@ pub const DEBUG_STROBE_GPIO: u8 = 27;
 /// TMC2209 × 2 bench pin map (decision log #32): both drivers run in pin
 /// mode (STEP/DIR/EN; MS jumpers + Vref on the boards). The transport axis
 /// keeps the old 2240 STEP/DIR/EN pins (15/32/14); the takeup reuses the
-/// pins the retired SPI interface freed (23/21/12). A WROVER devkit's
+/// pins the retired SPI interface freed (23/21/13). A WROVER devkit's
 /// internal flash/PSRAM consumes GPIO 6-11 and 16-17. Documented here
 /// (not type-level: pins are compile-time GPIO types in main.rs).
+///
+/// TAKEUP_EN was originally GPIO12 — moved to GPIO13. GPIO12 (MTDI) is an
+/// ESP32 boot strapping pin that selects flash voltage (VDD_SDIO) at
+/// reset; most TMC2209 breakout boards pull EN high by default (fail-safe
+/// disabled state), which forced GPIO12 high on every reset and made the
+/// bootloader mis-select 1.8V flash against this board's 3.3V flash,
+/// corrupting every SPI read (`invalid header: 0xffffffff`) until the RTC
+/// WDT fired again — a multi-cycle boot-loop that looked like "the whole
+/// system halts" after any unrelated reset during a run. GPIO13 is not a
+/// strapping pin and is otherwise unused on this board.
 #[allow(dead_code)]
 pub mod tmc2209_pins {
     /// ENN — active LOW: low = driver enabled, high = disabled/freewheel.
     pub const TRANSPORT_EN: u8 = 14;
     pub const TRANSPORT_STEP: u8 = 15;
     pub const TRANSPORT_DIR: u8 = 32;
-    pub const TAKEUP_EN: u8 = 12;
+    pub const TAKEUP_EN: u8 = 13;
     /// Takeup STEP is an LEDC pulse train (channel 1), not RMT.
     pub const TAKEUP_STEP: u8 = 23;
     pub const TAKEUP_DIR: u8 = 21;

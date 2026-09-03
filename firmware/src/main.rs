@@ -133,7 +133,7 @@ async fn main(spawner: Spawner) {
                 peripherals.GPIO32, // transport DIR
             );
             let takeup = drivers::takeup::Takeup::new(
-                peripherals.GPIO12, // takeup EN
+                peripherals.GPIO13, // takeup EN (was GPIO12 — boot strapping pin conflict)
                 peripherals.GPIO21, // takeup DIR
             );
 

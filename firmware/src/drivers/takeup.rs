@@ -18,7 +18,7 @@
 
 use esp_hal::gpio::{Level, Output, OutputConfig};
 use esp_hal::gpio::interconnect::PeripheralOutput;
-use esp_hal::peripherals::{GPIO12, GPIO21, GPIO23};
+use esp_hal::peripherals::{GPIO13, GPIO21, GPIO23};
 
 use logic::consts::TAKEUP_USTEPS_PER_FRAME;
 
@@ -62,7 +62,7 @@ pub struct Takeup {
 }
 
 impl Takeup {
-    pub fn new(en: GPIO12<'static>, dir: GPIO21<'static>) -> Self {
+    pub fn new(en: GPIO13<'static>, dir: GPIO21<'static>) -> Self {
         Self {
             // ENN high = disabled at power-on.
             en: Output::new(en, Level::High, OutputConfig::default()),
