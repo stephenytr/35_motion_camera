@@ -193,6 +193,16 @@ pub async fn ui_task(
     let mut last_flush = embassy_time::Instant::now();
     let mut boost_prev = false;
     let mut inch_prev = false;
+    // Bus-fault recovery (decision #37): a wedged I2C bus no longer means
+    // permanent headless. A failed flush starts a 2 s cooldown; after that
+    // we retry with the same bus instance — esp-hal's blocking driver runs
+    // its bus-clear sequence (`ensure_idle_blocking` → clear_bus) before
+    // every transaction, so a transient wedge self-heals and the display
+    // comes back. Each attempt is bounded by the 300 ms transaction
+    // timeout, so a hard-stuck bus costs ≤300 ms every 2 s — harmless.
+    let mut fault_cooldown: Option<embassy_time::Instant> = None;
+    #[cfg(feature = "debug-prints")]
+    let mut fault_count: u32 = 0;
 
     loop {
         ticker.next().await;
@@ -291,21 +301,32 @@ pub async fn ui_task(
             last_screen = Some(screen);
             last_flush = embassy_time::Instant::now();
             if let Some(disp) = display.as_mut() {
-                #[cfg(feature = "debug-prints")]
-                {
-                    let n = UI_TICK.fetch_add(1, Ordering::Relaxed);
-                    if n % 33 == 0 {
-                        log::info!("dbg: ui alive");
+                let ready = fault_cooldown
+                    .map_or(true, |until| embassy_time::Instant::now() >= until);
+                if ready {
+                    #[cfg(feature = "debug-prints")]
+                    {
+                        let n = UI_TICK.fetch_add(1, Ordering::Relaxed);
+                        if n % 33 == 0 {
+                            log::info!("dbg: ui alive");
+                        }
+                        log::info!("dbg: ui draw begin");
                     }
-                    log::info!("dbg: ui draw begin");
+                    if disp.write_screen(&screen).is_err() {
+                        // Bus fault (motor noise, display glitch): back off
+                        // and retry — see the recovery note above.
+                        warn!("ui: OLED write failed — retrying in 2 s");
+                        fault_cooldown =
+                            Some(embassy_time::Instant::now() + Duration::from_millis(2000));
+                        #[cfg(feature = "debug-prints")]
+                        {
+                            fault_count += 1;
+                            log::info!("dbg: ui bus fault #{fault_count}");
+                        }
+                    }
+                    #[cfg(feature = "debug-prints")]
+                    log::info!("dbg: ui drawn");
                 }
-                if disp.write_screen(&screen).is_err() {
-                    // Bus fault (e.g. display yanked): go headless.
-                    warn!("ui: OLED write failed — running headless");
-                    display = None;
-                }
-                #[cfg(feature = "debug-prints")]
-                log::info!("dbg: ui drawn");
             }
         }
     }
