@@ -3,10 +3,18 @@
 //! `logic::profile`.
 //!
 //! The heartbeat ISR kicks one non-blocking transmit per FrameStart; the
-//! table is 481 PulseCodes (480 periods + end marker) and fits the esp32's
-//! full 512-word RMT RAM with `memsize = 8`, so no mid-transfer refill or
-//! task participation is needed. The ISR reclaims the finished transaction
-//! at the next frame start (a full 18+ ms after transfer end at 24 fps).
+//! table is 481 PulseCodes (480 periods + end marker).
+//!
+//! Memory model changed with the ESP32-S3 (decision #34/#36): the classic
+//! chip's 512-word RMT RAM held the whole table in one load; the S3 has
+//! only 192 words (4 × 48), so the table no longer fits. The transfer now
+//! streams: esp-hal preloads the first 192 entries and a dedicated P2 RMT
+//! interrupt services the hardware's threshold events, refilling the FIFO
+//! from the prebuilt table while the tail is still playing. The threshold
+//! sits at half the channel RAM (96 words); worst-case drain rate at 36 fps
+//! is ~31 entries/ms, so the ~3 ms runway has an interrupt-latency margin
+//! of several orders of magnitude — refill cannot miss unless interrupts
+//! are dead, in which case the RMT underrun raises the usual RmtBusy fault.
 //!
 //! Busy at kick time = the previous transfer overran the frame — per
 //! ARCHITECTURE this publishes `Fault::RmtBusy` (caught one frame late by
@@ -18,6 +26,7 @@ use core::sync::atomic::{AtomicU32, Ordering};
 use embassy_sync::blocking_mutex::CriticalSectionMutex;
 use esp_hal::gpio::interconnect::PeripheralOutput;
 use esp_hal::gpio::Level;
+use esp_hal::interrupt::{InterruptHandler, Priority};
 use esp_hal::peripherals::RMT;
 use esp_hal::rmt::{Channel, PulseCode, Rmt, Tx, TxChannelConfig, TxChannelCreator, TxTransaction};
 use esp_hal::time::Rate;
@@ -25,7 +34,7 @@ use esp_hal::Blocking;
 use logic::consts::FRAME_USTEPS;
 use logic::profile::StepTable;
 
-use crate::fault::{ErrorCode, Event, EVENTS};
+use crate::fault::ErrorCode;
 
 /// 480 µstep periods + end marker.
 const MAX_CODES: usize = FRAME_USTEPS as usize + 1;
@@ -44,6 +53,8 @@ static SLOT: CriticalSectionMutex<RefCell<Option<Slot>>> =
     CriticalSectionMutex::new(RefCell::new(None));
 
 /// Create the channel (called in the core-1 closure) and park it idle.
+/// Binds the S3 mid-transfer refill ISR (P2, core 1) on the RMT threshold
+/// interrupt — see the module docs.
 pub fn init(rmt: RMT<'static>, pin: impl PeripheralOutput<'static>) {
     let rmt = Rmt::new(rmt, Rate::from_mhz(80)).expect("rmt init");
     let channel = rmt
@@ -53,11 +64,58 @@ pub fn init(rmt: RMT<'static>, pin: impl PeripheralOutput<'static>) {
                 .with_clk_divider(80) // 80 MHz / 80 = 1 MHz, 1 tick = 1 µs
                 .with_idle_output_level(Level::Low)
                 .with_idle_output(true)
-                .with_memsize(8), // whole 512-word RMT RAM
+                .with_memsize(4), // S3: 4 × 48 words = the whole 192-word RAM
         )
         .expect("rmt tx config")
         .with_pin(pin);
     SLOT.lock(|slot| *slot.borrow_mut() = Some(Slot::Idle(channel)));
+
+    // Refill plumbing: fire the P2 ISR whenever channel 0 drains to the
+    // threshold watermark. esp-hal's blocking driver polls the same status
+    // bits, so the ISR just borrows the transaction and calls `poll()`.
+    let regs = esp_hal::peripherals::RMT::regs();
+    regs.int_ena()
+        .modify(|_, w| w.ch_tx_thr_event(0).bit(true));
+    esp_hal::interrupt::bind_handler(
+        esp_hal::peripherals::Interrupt::RMT,
+        InterruptHandler::new(rmt_refill_isr, Priority::Priority2),
+    );
+}
+
+/// P2 mid-transfer refill (S3, decision #36): the hardware raised the TX
+/// threshold event — top the channel RAM back up from the prebuilt table.
+/// Lock discipline: SLOT's critical-section mutex is per-core (core 1), and
+/// the heartbeat ISR (also P2) cannot nest us; the director's build_table
+/// and the heartbeat's kick() contend for the same lock on this core, so
+/// the critical section is short (a handful of register writes).
+#[esp_hal::ram]
+extern "C" fn rmt_refill_isr() {
+    // Edge-triggered clear first so the event can re-fire.
+    esp_hal::peripherals::RMT::regs()
+        .int_clr()
+        .write(|w| w.ch_tx_thr_event(0).bit(true));
+
+    crate::status::STATUS
+        .rmt_refills
+        .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+
+    SLOT.lock(|slot| {
+        let mut slot = slot.borrow_mut();
+        match slot.take() {
+            Some(Slot::Busy(mut tx)) => {
+                // poll() clears the status bit and, on a threshold event,
+                // writes the next chunk of the table into the freed RAM.
+                // If it returns true the transfer finished — leave it in
+                // the slot; the next kick() reclaims it (existing design).
+                tx.poll();
+                *slot = Some(Slot::Busy(tx));
+            }
+            // Idle/None: spurious event (e.g. the transfer ended between
+            // the hardware event and this ISR). Nothing to do.
+            Some(Slot::Idle(ch)) => *slot = Some(Slot::Idle(ch)),
+            None => {}
+        }
+    });
 }
 
 /// Rebuild the symbol table from a profile. Safe whenever the RMT channel
@@ -101,6 +159,9 @@ pub fn build_table(table: &StepTable) -> bool {
             }
         };
         if !free {
+            crate::status::STATUS
+                .rmt_poll_false
+                .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
             return false;
         }
         unsafe {
@@ -119,9 +180,13 @@ pub fn build_table(table: &StepTable) -> bool {
 
 /// Start the next frame's transfer (heartbeat ISR at FrameStart).
 pub fn kick() {
+    crate::status::STATUS
+        .rmt_kicks
+        .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
     SLOT.lock(|slot| {
         let mut slot = slot.borrow_mut();
         let cur = slot.take();
+        let mut busy_raise = false;
         let next = match cur {
             None => None,
             Some(Slot::Idle(ch)) => start(ch),
@@ -132,16 +197,25 @@ pub fn kick() {
                     match tx.wait() {
                         Ok(ch) => start(ch),
                         Err((_, ch)) => {
-                            let _ = EVENTS.try_send(Event::Fault(ErrorCode::RmtBusy));
+                            crate::fault::raise(ErrorCode::RmtBusy);
+                            busy_raise = true;
                             Some(Slot::Idle(ch))
                         }
                     }
                 } else {
-                    let _ = EVENTS.try_send(Event::Fault(ErrorCode::RmtBusy));
+                    crate::fault::raise(ErrorCode::RmtBusy);
+                    busy_raise = true;
                     Some(Slot::Busy(tx))
                 }
             }
         };
+        if busy_raise {
+            // The previous transfer was genuinely still running at kick
+            // time: RmtBusy raised. Count it for the wedge diagnostics.
+            crate::status::STATUS
+                .rmt_busy
+                .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        }
         *slot = next;
     });
 }
@@ -157,7 +231,7 @@ fn start(ch: Channel<'static, Blocking, Tx>) -> Option<Slot> {
     match ch.transmit(data) {
         Ok(tx) => Some(Slot::Busy(tx)),
         Err((_, ch)) => {
-            let _ = EVENTS.try_send(Event::Fault(ErrorCode::RmtBusy));
+            crate::fault::raise(ErrorCode::RmtBusy);
             Some(Slot::Idle(ch))
         }
     }

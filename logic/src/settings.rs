@@ -73,6 +73,14 @@ impl Settings {
             && self.boost_mult <= 2.0
             && self.hold_pct <= 100
             && self.roll_frames > 0
+            // Ramp rates aren't yet menu-editable, but a CRC-valid record
+            // with a corrupt/nonsensical value (0, negative, or absurdly
+            // large) should still fall back to defaults rather than load
+            // as-is — same reasoning as every other field here.
+            && self.ramp_up_fps_s > 0.0
+            && self.ramp_up_fps_s <= 200.0
+            && self.ramp_down_fps_s > 0.0
+            && self.ramp_down_fps_s <= 200.0
     }
 
     /// Fixed-layout byte form for the storage codec (see
@@ -150,6 +158,19 @@ mod tests {
         assert!(!s.is_valid());
         let mut s = Settings::default();
         s.exposure_ms = 0;
+        assert!(!s.is_valid());
+    }
+
+    #[test]
+    fn corrupted_ramp_rates_are_rejected() {
+        let mut s = Settings::default();
+        s.ramp_up_fps_s = 0.0;
+        assert!(!s.is_valid());
+        let mut s = Settings::default();
+        s.ramp_down_fps_s = -1.0;
+        assert!(!s.is_valid());
+        let mut s = Settings::default();
+        s.ramp_up_fps_s = 1_000.0;
         assert!(!s.is_valid());
     }
 

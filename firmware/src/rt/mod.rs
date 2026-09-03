@@ -43,6 +43,11 @@ pub fn arm_job(job: Job) {
     deadman::set_timeout(timeout_us);
     // A full job replaces params — stale live updates (boost ramp) are void.
     heartbeat::clear_live_params();
+    // A stale Recover-stop request from a previous, interrupted Recover
+    // job (stopped/superseded before any index edge arrived) must not
+    // leak into this new job and spuriously request a park at its first
+    // accepted edge. Only `Command::Recover` re-arms this.
+    index::arm_recover_stop(false);
     MAILBOX.lock(|m| *m.borrow_mut() = Some(job));
     heartbeat::kick();
 }
@@ -58,8 +63,10 @@ static SAFE: AtomicBool = AtomicBool::new(false);
 #[esp_hal::ram]
 pub fn safe_state() {
     // Shutter + take-up LEDC channels to 0%, with the DUTY_START latch pulse.
+    // S3 note: the LEDC register block uses `ch()` accessors (no hsch/lsch
+    // split on the S3 PAC) — decision #33.
     for ch in 0..2 {
-        let ch = esp_hal::peripherals::LEDC::regs().hsch(ch);
+        let ch = esp_hal::peripherals::LEDC::regs().ch(ch);
         ch.duty().write(|w| unsafe { w.duty().bits(0) });
         ch.conf1().modify(|_, w| w.duty_start().set_bit());
     }
@@ -68,13 +75,19 @@ pub fn safe_state() {
     // ISR window — rt::shutter module docs). The heartbeat's next arm
     // re-arms it.
     shutter::latch_disarmed();
-    // TMC2240/5160 ENN high = driver disabled, motor freewheels (SPECS §7.2).
-    // Raw GPIO poke: works pre-`esp_hal::init` and from P3 ISRs.
+    // Both TMC2209 ENN pins high = drivers disabled, motors freewheel
+    // (SPECS §7.2). Raw GPIO poke: works pre-`esp_hal::init` and from P3
+    // ISRs.
     let gpio = esp_hal::peripherals::GPIO::regs();
-    let mask = 1u32 << crate::consts::tmc_pins::EN;
-    unsafe {
-        gpio.enable_w1ts().write(|w| w.bits(mask));
-        gpio.out_w1ts().write(|w| w.bits(mask));
+    for pin in [
+        crate::consts::tmc2209_pins::TRANSPORT_EN,
+        crate::consts::tmc2209_pins::TAKEUP_EN,
+    ] {
+        let mask = 1u32 << pin;
+        unsafe {
+            gpio.enable_w1ts().write(|w| w.bits(mask));
+            gpio.out_w1ts().write(|w| w.bits(mask));
+        }
     }
 }
 

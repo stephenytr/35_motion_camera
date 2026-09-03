@@ -1,11 +1,9 @@
-//! Driver layer (ARCHITECTURE §7). Bring-up order:
-//!
-//! TODO: `takeup` — LEDC + DIR, feedforward duty table vs fps
-//! TODO: `oled` — async I2C ssd1306 + embedded-graphics, core 0
-//! TODO: `buttons` — async GPIO with task-side debounce
-//! TODO: `storage` — embedded-storage flash, ping-pong 4 KB, CRC32 records
+//! Driver layer (ARCHITECTURE §7). Core-1 drivers (motion + shutter
+//! waveform) are constructed in the core-1 closure; the OLED (core 0)
+//! is owned by the UI task.
 
-pub mod lcd1602;
+pub mod oled;
 pub mod rmt_step;
 pub mod shutter;
-pub mod tmc;
+pub mod takeup;
+pub mod tmc2209;

@@ -1,61 +1,66 @@
-//! Deadman (ARCHITECTURE §4.4): TIMG1 watchdog stage 0 at P3 — the last line.
+//! Deadman (ARCHITECTURE §4.4): TIMG1 MWDT, two stages, P3 — the last line.
 //!
-//! The director programs the timeout per job (2.5 × frame period, min 100 ms,
-//! via `rt::arm_job`); the heartbeat *feeds* the watchdog at every firing.
-//! If the RT-plane chain stalls, stage 0 times out, this P3 ISR latches safe
-//! state, writes the fault marker, and disarms the watchdog — the now-unfed
-//! RTC watchdog reboots the chip, which boots into `ERROR WD` via the marker.
+//! Stage 0 fires an interrupt at the programmed timeout (2.5 × frame
+//! period, min 100 ms, via `rt::arm_job`); the heartbeat *feeds* the WDT at
+//! every firing. If the RT-plane chain stalls, stage 0 times out, this P3
+//! ISR latches safe state, writes the fault marker, and disarms the WDT —
+//! the now-unfed RTC watchdog reboots the chip, which boots into `ERROR WD`
+//! via the marker.
 //!
-//! Why the TIMG WDT: the esp-hal rc has no systimer driver for the esp32
-//! (decision log #15's systimer alarm1 applies to the esp32-s3), and the
-//! esp32's legacy FRC timers are ROM-owned and poorly documented. The TIMG
-//! WDT is a real watchdog (hardware reset backstop available later) with an
-//! identical register map on esp32 and esp32-s3. Registers below are from the
-//! IDF `timer_group_reg.h`.
+//! Stage 1 is the new hardware backstop (the classic ESP32 deadman had no
+//! such thing — decision #34): it resets the system outright at 2× the
+//! stage-0 timeout. If the interrupt path itself is dead (handler never
+//! bound, interrupts masked, ISR corrupted), stage 1 still brings the chip
+//! down instead of leaving the plane frozen with no watchdog at all.
+//!
+//! Register access is typed through the esp32s3 PAC: the classic code used
+//! raw pointers at 0x3FF60000 with the old WDTCONFIG0/1/2 layout; the S3
+//! TIMG1 lives at 0x60020000 with per-stage `WDTCONFIG[n].hold` registers
+//! and `WDTCONFIG1` prescale (tick = 12.5 ns × prescale, so 80 → 1 µs).
 //!
 //! Lock discipline: this P3 ISR takes **no locks**. On Xtensa, critical
-//! sections do not mask interrupts, so it can preempt a P2 ISR holding any of
-//! the RT-plane mutexes — touching those mutexes here would self-deadlock the
-//! core. It only touches raw registers, the lock-free SAFE latch, and the
-//! lock-free event channel.
+//! sections do not mask interrupts, so it can preempt a P2 ISR holding any
+//! of the RT-plane mutexes — touching those mutexes here would self-deadlock
+//! the core. It only touches raw registers, the lock-free SAFE latch, and
+//! the lock-free fault atomics.
 
 use esp_hal::interrupt::{InterruptHandler, Priority};
+use esp_hal::peripherals::TIMG1;
 use logic::interlock::ErrorCode;
 
-use crate::fault::{self, Event, EVENTS};
+use crate::fault;
 
-// TIMG1 block (esp32: 0x3FF60000). Watchdog registers per IDF.
-const TIMG1_BASE: u32 = 0x3FF6_0000;
-const WDT_CONFIG0: *mut u32 = (TIMG1_BASE + 0x48) as *mut u32;
-const WDT_CONFIG1: *mut u32 = (TIMG1_BASE + 0x4C) as *mut u32;
-const WDT_CONFIG2: *mut u32 = (TIMG1_BASE + 0x50) as *mut u32;
-const WDT_FEED: *mut u32 = (TIMG1_BASE + 0x60) as *mut u32;
-const WDT_WPROTECT: *mut u32 = (TIMG1_BASE + 0x64) as *mut u32;
-const INT_CLR: *mut u32 = (TIMG1_BASE + 0xA4) as *mut u32;
-
-// WDTCONFIG0 bits (IDF TIMG_WDT_*).
-const WDT_EN: u32 = 1 << 31;
-const WDT_STG0_INT: u32 = 1 << 29; // stage 0 action = interrupt
-const WDT_LEVEL_INT_EN: u32 = 1 << 21;
-const WDT_CPU_RESET_LEN: u32 = 7 << 18;
-const WDT_SYS_RESET_LEN: u32 = 7 << 15;
-const WDT_INT_CLR_BIT: u32 = 1 << 2; // TIMG_INT_CLR_TIMERS WDT bit
-
-/// Write-protection key: writing this value unlocks the WDT registers.
+/// Write-protection key: writing this value unlocks the WDT registers
+/// (IDF `TIMG_WDT_WKEY_VALUE`, identical across ESP32 generations).
 const WDT_UNLOCK_KEY: u32 = 0x50D8_3AA1;
 
-/// SWDT clock prescale (WDTCONFIG1 [31:16]): tick = 12.5 ns × prescale.
-/// 80 → tick = 1 µs, so STG0_HOLD is the timeout in µs (32-bit range).
+/// MWDT clock prescale (WDTCONFIG1 [31:16]): tick = 12.5 ns × prescale.
+/// 80 → tick = 1 µs, so `hold` is programmed in µs directly (32-bit range).
 const WDT_PRESCALE: u32 = 80;
+
+/// Stage actions (WDTCONFIG0 fields): 0 = off, 1 = interrupt, 2 = reset
+/// CPU, 3 = reset system.
+const STG_OFF: u8 = 0;
+const STG_INTERRUPT: u8 = 1;
+const STG_RESET_SYSTEM: u8 = 3;
+
+/// Reset pulse lengths for the stage-1 reset (WDTCONFIG0): max value keeps
+/// the chip held in reset long enough to fully discharge rails.
+const RESET_LEN: u8 = 7;
+
+fn unlock() {
+    TIMG1::regs()
+        .wdtwprotect()
+        .write(|w| unsafe { w.wdt_wkey().bits(WDT_UNLOCK_KEY) });
+}
 
 /// Bind the P3 ISR on core 1 and park the watchdog disarmed. Called in the
 /// core-1 closure before the heartbeat.
 pub fn init() {
-    unsafe {
-        WDT_WPROTECT.write_volatile(WDT_UNLOCK_KEY);
-        WDT_CONFIG0.write_volatile(0); // disarmed
-        INT_CLR.write_volatile(WDT_INT_CLR_BIT);
-    }
+    let tg = TIMG1::regs();
+    unlock();
+    tg.wdtconfig0().write(|w| unsafe { w.bits(0) }); // disarmed
+    tg.int_clr().write(|w| w.wdt().bit(true));
     esp_hal::interrupt::bind_handler(
         esp_hal::peripherals::Interrupt::TG1_WDT_LEVEL,
         InterruptHandler::new(
@@ -65,43 +70,53 @@ pub fn init() {
     );
 }
 
-/// Program the timeout (via `rt::arm_job`; ARCHITECTURE §4.4): the watchdog
-/// fires if the heartbeat does not feed within `us` µs.
+/// Program both stage timeouts (via `rt::arm_job`; ARCHITECTURE §4.4):
+/// stage 0 fires the interrupt if the heartbeat does not feed within `us`
+/// µs; stage 1 resets the system at 2× that if the interrupt path is dead.
 pub fn set_timeout(us: u32) {
-    unsafe {
-        WDT_WPROTECT.write_volatile(WDT_UNLOCK_KEY);
-        WDT_CONFIG1.write_volatile(WDT_PRESCALE << 16);
-        WDT_CONFIG2.write_volatile(us.max(1)); // STG0_HOLD, µs == ticks
-        WDT_CONFIG0.write_volatile(
-            WDT_EN | WDT_STG0_INT | WDT_LEVEL_INT_EN | WDT_CPU_RESET_LEN | WDT_SYS_RESET_LEN,
-        );
-        WDT_FEED.write_volatile(1);
-    }
+    let tg = TIMG1::regs();
+    let us = us.max(1);
+    unlock();
+    tg.wdtconfig1()
+        .write(|w| unsafe { w.wdt_clk_prescale().bits(WDT_PRESCALE as u16) });
+    tg.wdtconfig(0).write(|w| unsafe { w.hold().bits(us) });
+    tg.wdtconfig(1)
+        .write(|w| unsafe { w.hold().bits(us.saturating_mul(2)) });
+    tg.wdtconfig0().write(|w| unsafe {
+        w.wdt_en().set_bit();
+        w.wdt_flashboot_mod_en().clear_bit();
+        w.wdt_stg0().bits(STG_INTERRUPT);
+        w.wdt_stg1().bits(STG_RESET_SYSTEM);
+        w.wdt_stg2().bits(STG_OFF);
+        w.wdt_stg3().bits(STG_OFF);
+        w.wdt_cpu_reset_length().bits(RESET_LEN);
+        w.wdt_sys_reset_length().bits(RESET_LEN);
+        w
+    });
+    feed();
 }
 
-/// Feed (heartbeat ISR, every firing): restart the watchdog cycle. A single
-/// raw write — ISR-safe.
+/// Feed (heartbeat ISR, every firing): restart the whole watchdog cycle.
+/// A single raw write — ISR-safe.
 #[inline]
 pub fn feed() {
-    unsafe { WDT_FEED.write_volatile(1) };
+    TIMG1::regs().wdtfeed().write(|w| unsafe { w.wdt_feed().bits(1) });
 }
 
 /// Disarm (heartbeat on park).
 pub fn disarm() {
-    unsafe {
-        WDT_WPROTECT.write_volatile(WDT_UNLOCK_KEY);
-        WDT_CONFIG0.write_volatile(0);
-    }
+    let tg = TIMG1::regs();
+    unlock();
+    tg.wdtconfig0().write(|w| unsafe { w.bits(0) });
 }
 
 #[esp_hal::ram]
 extern "C" fn deadman_isr() {
-    unsafe {
-        INT_CLR.write_volatile(WDT_INT_CLR_BIT);
-        WDT_WPROTECT.write_volatile(WDT_UNLOCK_KEY);
-        WDT_CONFIG0.write_volatile(0); // disarm; no further IRQs
-    }
+    let tg = TIMG1::regs();
+    tg.int_clr().write(|w| w.wdt().bit(true));
+    unlock();
+    tg.wdtconfig0().write(|w| unsafe { w.bits(0) }); // disarm; no further IRQs
     crate::rt::latch_safe_state();
     fault::marker_write(ErrorCode::Watchdog.code());
-    let _ = EVENTS.try_send(Event::Fault(ErrorCode::Watchdog));
+    crate::fault::raise(ErrorCode::Watchdog);
 }

@@ -111,6 +111,17 @@ pub fn halt() {
             hb.stop();
         }
     });
+    // Force a clean re-entry point (generalizes the decision-#21 park fix
+    // to every halt() caller, not just the voluntary end-of-job park):
+    // door-open and jam-detected can both call halt() at any point in the
+    // cycle, including `Phase::ExposeStart`. Without this, the next arm's
+    // first firing would see a stale `ExposeStart` phase, skip the mailbox
+    // drain (gated on `FrameStart`), and run one phantom step with the
+    // *previous* job's params/direction/remaining before self-correcting —
+    // a spurious shutter actuation and a one-frame position/counter desync.
+    CYCLE.lock(|cyc_cell| {
+        cyc_cell.borrow_mut().phase = Phase::FrameStart;
+    });
 }
 
 /// Request a clean park at the *next* frame boundary (Command::Stop,
@@ -223,7 +234,7 @@ extern "C" fn heartbeat_isr() {
                     super::shutter::disarm();
                     super::deadman::disarm();
                     PARKED.store(true, Ordering::SeqCst);
-                    let _ = EVENTS.try_send(Event::Fault(logic::interlock::ErrorCode::Jam));
+                    crate::fault::raise(logic::interlock::ErrorCode::Jam);
                     return;
                 }
                 // High-rate counters go straight to atomics, not the event

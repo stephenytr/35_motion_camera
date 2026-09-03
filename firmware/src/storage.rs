@@ -17,7 +17,7 @@ use log::{info, warn};
 
 use crate::fault::{Event, EVENTS};
 use crate::settings_store;
-use crate::status::{State, Status};
+use crate::status::Status;
 use logic::storage_codec::{self, Slot, SECTOR_SIZE};
 
 /// Physical media abstraction (see module docs).
@@ -73,14 +73,30 @@ impl StorageBackend for FlashBackend {
     fn write_sector(&mut self, slot: Slot, sector: &[u8; SECTOR_SIZE]) -> bool {
         let addr = Self::sector_addr(slot);
         // One 4 KB sector erase, then program. Both park core 1 briefly.
+        #[cfg(feature = "debug-prints")]
+        let t0 = esp_hal::time::Instant::now();
         match self.flash.erase(addr, addr + SECTOR_SIZE as u32) {
-            Ok(()) => match self.flash.write_nor(addr, sector) {
-                Ok(()) => true,
-                Err(e) => {
-                    warn!("storage: flash write {slot:?} failed: {e:?}");
-                    false
+            Ok(()) => {
+                #[cfg(feature = "debug-prints")]
+                log::info!(
+                    "storage: erase done ({} ms)",
+                    (esp_hal::time::Instant::now() - t0).as_millis()
+                );
+                match self.flash.write_nor(addr, sector) {
+                    Ok(()) => {
+                        #[cfg(feature = "debug-prints")]
+                        log::info!(
+                            "storage: program done ({} ms total)",
+                            (esp_hal::time::Instant::now() - t0).as_millis()
+                        );
+                        true
+                    }
+                    Err(e) => {
+                        warn!("storage: flash write {slot:?} failed: {e:?}");
+                        false
+                    }
                 }
-            },
+            }
             Err(e) => {
                 warn!("storage: flash erase {slot:?} failed: {e:?}");
                 false
@@ -90,7 +106,7 @@ impl StorageBackend for FlashBackend {
 }
 
 #[embassy_executor::task]
-pub async fn storage_task(status: &'static Status) {
+pub async fn storage_task(_status: &'static Status) {
     info!("storage: up, idle-gated persistence checker at 1 Hz (flash @ 0x9000)");
     let mut backend = FlashBackend::new();
     let mut ticker = Ticker::every(Duration::from_secs(1));
@@ -114,34 +130,47 @@ pub async fn storage_task(status: &'static Status) {
 
     loop {
         ticker.next().await;
+        crate::liveness::LIVENESS.bump_storage();
+        #[cfg(feature = "debug-prints")]
+        log::info!("dbg: storage tick dirty={}", settings_store::is_dirty());
         if !settings_store::is_dirty() {
             continue;
         }
-        match status.state() {
-            State::Idle | State::Door | State::Error => {
-                // ARCHITECTURE §12: flash writes only at idle boundaries.
-                let payload = settings_store::get();
-                seq = seq.wrapping_add(1);
-                let (a, b) = backend.read_sectors();
-                let live = storage_codec::choose(&a, &b).map(|(slot, _, _)| slot);
-                let next_slot = match live {
-                    Some(slot) => slot.other(),
-                    None => Slot::B, // first write ever goes to B
-                };
-                let mut sector = [0xFFu8; SECTOR_SIZE];
-                storage_codec::encode(&mut sector, seq, &payload);
-                if backend.write_sector(next_slot, &sector) {
-                    settings_store::dirty_take();
-                    info!("storage: persisted seq {seq} to sector {next_slot:?}");
-                    let _ = EVENTS.try_send(Event::SettingsChanged);
-                } else {
-                    warn!("storage: persist failed — retrying next idle tick");
-                }
-            }
-            _ => {
-                // Transport active: keep the dirty flag, retry at the next
-                // idle boundary (invariant 4, ARCHITECTURE §12).
+        // ARCHITECTURE §12: flash writes only at idle boundaries. Gate on
+        // the RT plane directly (`heartbeat::is_parked()`), not on
+        // `status.state()` — nothing ever set `State::Run` (RunToggle only
+        // sets Idle/Door/Error/Single/Inch), so the old match let a flash
+        // write land *while the transport was actively running*. The
+        // erase+program parks core 1 for ~100-200 ms; the heartbeat ISR
+        // isn't `#[ram]`-resident, so it stalls until flash is readable
+        // again, misses its deadman feed, and the (RAM-resident) deadman
+        // fires — latching safe state and, after the RTC watchdog stops
+        // being fed, rebooting the chip. That's the "motor stops, counters
+        // reset to 0" bug: a full unplanned reboot mid-take.
+        if crate::rt::heartbeat::is_parked() {
+            let payload = settings_store::get();
+            seq = seq.wrapping_add(1);
+            let (a, b) = backend.read_sectors();
+            let live = storage_codec::choose(&a, &b).map(|(slot, _, _)| slot);
+            let next_slot = match live {
+                Some(slot) => slot.other(),
+                None => Slot::B, // first write ever goes to B
+            };
+            let mut sector = [0xFFu8; SECTOR_SIZE];
+            storage_codec::encode(&mut sector, seq, &payload);
+            // Log before the write: erase+program parks core 1, and if the
+            // park ever wedges (see settings_store doc), this line is the
+            // last thing on serial before the SysRtcWdt reboot.
+            info!("storage: writing seq {seq} to sector {next_slot:?} (core 1 parked)");
+            if backend.write_sector(next_slot, &sector) {
+                settings_store::dirty_take();
+                info!("storage: persisted seq {seq} to sector {next_slot:?}");
+                let _ = EVENTS.try_send(Event::SettingsChanged);
+            } else {
+                warn!("storage: persist failed — retrying next idle tick");
             }
         }
+        // Transport active: keep the dirty flag, retry at the next idle
+        // boundary (invariant 4, ARCHITECTURE §12).
     }
 }

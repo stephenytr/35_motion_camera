@@ -1,6 +1,5 @@
-//! Button inputs (SPECS §9.2): active-low. Internal pull-ups where the pin
-//! supports them (5/25/26/22/33); the input-only pins 36/39 need external
-//! 10k pull-ups on the bench.
+//! Button inputs (SPECS §9.2): active-low with internal pull-ups — the
+//! ESP32-S3 has pull-ups on every GPIO, so no external resistors are needed.
 //!
 //! Debounce model: a press fires on the *first* low sample (fast response —
 //! the core-0 executor quantizes sampling to ~100 ms, so multi-sample press
@@ -10,9 +9,13 @@
 //! Bench set: RUN, MENU, ▲, ▼ + the shooting cluster (BOOST hold, FRAME,
 //! INCH hold — SPECS §9.3). DOOR is the real door-switch input (GPIO4,
 //! rt::door), bench-wired as a momentary button: hold = closed.
+//!
+//! S3 pin notes (decision #33): GPIO22-25 don't exist on the ESP32-S3, and
+//! GPIO33-37 are consumed by octal PSRAM on the N16R8 module — MENU/▲/▼
+//! moved to 26/29/28, BOOST to 48, FRAME to 12.
 
 use esp_hal::gpio::{Input, InputConfig, Pull};
-use esp_hal::peripherals::{GPIO22, GPIO25, GPIO26, GPIO33, GPIO36, GPIO39, GPIO5};
+use esp_hal::peripherals::{GPIO5, GPIO12, GPIO26, GPIO28, GPIO29, GPIO39, GPIO48};
 
 /// One debounced button.
 struct Button {
@@ -89,16 +92,14 @@ impl Buttons {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         run: GPIO5<'static>,
-        menu: GPIO25<'static>,
-        up: GPIO26<'static>,
-        down: GPIO22<'static>,
-        boost: GPIO33<'static>,
-        frame: GPIO36<'static>,
+        menu: GPIO26<'static>,
+        up: GPIO29<'static>,
+        down: GPIO28<'static>,
+        boost: GPIO48<'static>,
+        frame: GPIO12<'static>,
         inch: GPIO39<'static>,
     ) -> Self {
         let cfg = InputConfig::default().with_pull(Pull::Up);
-        // 36/39 are input-only: the pull-up config is ignored in silicon,
-        // so the bench wires external 10k pull-ups on those two.
         Self {
             run: Button::new(Input::new(run, cfg)),
             menu: Button::new(Input::new(menu, cfg)),

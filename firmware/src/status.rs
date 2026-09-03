@@ -48,8 +48,20 @@ pub struct Status {
     /// Boost active (supervisor-owned; UI displays it).
     pub boost: AtomicBool,
     pub vbat_mv: AtomicU32,
+    /// Low-battery warn latch (SPECS §11: warn ≤ 19.8 V, no stop). Distinct
+    /// from `fault` — `CriticalBattery` (≤ 18.3 V) is the one that stops.
+    pub batt_warn: AtomicBool,
     /// 0 = none, else ErrorCode discriminant + payload (ARCHITECTURE §5.3).
     pub fault: AtomicU32,
+    /// RMT STEP diagnostics (ISR/director-written on core 1, polled on core
+    /// 0): transfer kicks, kicks that found the slot still busy (RmtBusy
+    /// raised), table rebuilds that found a transfer genuinely in flight
+    /// (the "ramp tick deferred" case), and S3 mid-transfer threshold
+    /// refills serviced by the P2 ISR.
+    pub rmt_kicks: AtomicU32,
+    pub rmt_busy: AtomicU32,
+    pub rmt_poll_false: AtomicU32,
+    pub rmt_refills: AtomicU32,
 }
 
 impl Status {
@@ -62,7 +74,12 @@ impl Status {
             door_open: AtomicBool::new(false),
             boost: AtomicBool::new(false),
             vbat_mv: AtomicU32::new(0),
+            batt_warn: AtomicBool::new(false),
             fault: AtomicU32::new(0),
+            rmt_kicks: AtomicU32::new(0),
+            rmt_busy: AtomicU32::new(0),
+            rmt_poll_false: AtomicU32::new(0),
+            rmt_refills: AtomicU32::new(0),
         }
     }
 

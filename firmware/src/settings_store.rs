@@ -1,14 +1,15 @@
 //! Runtime settings/counter store (ARCHITECTURE §12) — the in-RAM shadow of
-//! the persisted record. Tasks read/write it through a cross-core spinlock;
-//! the storage task persists it at idle boundaries.
+//! the persisted record. Tasks read/write it through a spinlock; the storage
+//! task persists it at idle boundaries.
 //!
-//! Cross-core by design (decision log #23/24): the director (core 1) writes
-//! settings, the supervisor/storage tasks (core 0) read counters — so the
-//! store uses a task-only spinlock, not a per-core critical-section mutex.
+//! Core-0-only by design (decision log #23/24): the supervisor, UI, and
+//! storage tasks (all core 0) are the only users. The director (core 1)
+//! deliberately never touches the store — esp-storage's flash writes
+//! hardware-park core 1 mid-`with_store` critical section, and core 0 would
+//! then spin on this lock forever (starved wdt_task → SysRtcWdt reboot).
 //! Only tasks touch it, never ISRs, and the lock is never held across an
 //! await — so the spin cannot deadlock (core-0 embassy tasks are
-//! cooperative; the core-1 director is only preempted by ISRs that don't
-//! touch the store).
+//! cooperative).
 //!
 //! Single-writer rule: any task may call `set` (it just marks dirty); only
 //! the storage task clears the dirty flag.
@@ -27,11 +28,21 @@ static mut STORE: Payload = Payload {
 
 static DIRTY: AtomicBool = AtomicBool::new(false);
 
+#[cfg(feature = "debug-prints")]
+static SPIN_COUNT: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+
 fn with_store<T>(f: impl FnOnce(&mut Payload) -> T) -> T {
     while LOCK
         .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
         .is_err()
     {
+        #[cfg(feature = "debug-prints")]
+        {
+            let n = SPIN_COUNT.fetch_add(1, Ordering::Relaxed);
+            if n % 1024 == 0 {
+                log::warn!("dbg: store lock contended (spins {n})");
+            }
+        }
         core::hint::spin_loop();
     }
     // SAFETY: the spinlock above gives exclusive access; all users of the

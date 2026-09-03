@@ -15,10 +15,8 @@ use embassy_sync::channel::Channel;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Event {
     JobComplete,
-    IndexTick,
     DoorOpen,
     DoorClosed,
-    Fault(ErrorCode),
     CounterZero,
     SettingsChanged,
 }
@@ -28,6 +26,19 @@ pub enum Event {
 pub type EventChannel = Channel<CriticalSectionRawMutex, Event, 32>;
 
 pub static EVENTS: EventChannel = EventChannel::new();
+
+/// Raise a fault: write it to `status::STATUS.fault` directly. The
+/// supervisor *polls* that atomic for deltas (its 20 ms loop) instead of
+/// receiving an event — the channel's critical-section mutex is per-core
+/// (decision log #23), and `RmtBusy` can raise at frame rate (~13 Hz) while
+/// a transfer is stuck, which made cross-core `try_send`s from the core-1
+/// ISR race the core-0 consumer at a rate the channel was never meant for.
+/// ISR-safe: one atomic store, no locks.
+pub fn raise(code: ErrorCode) {
+    crate::status::STATUS
+        .fault
+        .store(code.code(), core::sync::atomic::Ordering::Relaxed);
+}
 
 /// Fault marker (ARCHITECTURE §4.4): a `.noinit` static that survives the
 /// RTC-watchdog reboot, so the next boot can report what killed the last run.

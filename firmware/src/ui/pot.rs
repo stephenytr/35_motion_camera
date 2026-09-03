@@ -9,7 +9,7 @@
 
 use embassy_time::{Duration, Ticker};
 use esp_hal::analog::adc::{Adc, AdcConfig, Attenuation, AdcPin};
-use esp_hal::peripherals::{ADC1, GPIO34, GPIO35};
+use esp_hal::peripherals::{ADC1, GPIO1, GPIO2};
 use log::info;
 
 use super::{UiEvent, UI_EVENTS};
@@ -18,12 +18,17 @@ use logic::consts::{EXPOSURE_MAX_MS, EXPOSURE_MIN_MS, FPS_MAX, FPS_MIN};
 const POLL_MS: u64 = 100;
 /// 12-bit SAR; ~3.3 V span at 11 dB attenuation.
 const ADC_MAX: u32 = 4095;
-/// One bucket is ≥ ~124 raw counts (fps) / ≥ ~4 counts (exposure 2..1000);
-/// a 20-count deadband kills wiper noise for fps, and a 1-count deadband
-/// suffices for the fine-grained exposure pot (boundary flicker there is
-/// within 1 ms, and the supervisor dedupes anyway).
-const FPS_DEADBAND: u32 = 20;
-const EXP_DEADBAND: u32 = 1;
+/// Raw ADC spans per whole-step bucket — fps bucket ≈ 4095/33 ≈ 124
+/// counts, exposure bucket ≈ 4095/998 ≈ 4 counts. The exposure bucket is
+/// smaller than the ESP32 ADC's typical few-count wiper noise, so a tiny
+/// deadband lets the wiper oscillate across a bucket boundary every poll
+/// and flood the channel — the supervisor's counter-publish branch never
+/// runs while events keep arriving, so the displayed counter goes stale
+/// (audit finding: the symptoms looked like the heartbeat was broken, but
+/// it was only the supervisor starved of the Err timeout). Both deadbands
+/// are sized at multiple bucket widths to swallow boundary crossings.
+const FPS_DEADBAND: u32 = 60;
+const EXP_DEADBAND: u32 = 30;
 
 struct Pot {
     last_raw: Option<u32>,
@@ -42,15 +47,23 @@ impl Pot {
 
     /// Returns `Some(value)` when the pot's whole-step bucket changed
     /// (first sample always wins: the pot's physical position is master).
+    ///
+    /// Re-arms `last_raw` and `last_value` **together** only on a true
+    /// value change — same-bucket raw jitter never fires. The deadband
+    /// only compares raw to the last *fire's* raw, not the previous tick,
+    /// so a small jitter inside either bucket is inert and a back-and-forth
+    /// across the boundary has to clear the (now wider) deadband each way.
     fn update(&mut self, raw: u32, value: u32) -> Option<u32> {
-        let send = match (self.last_raw, self.last_value) {
-            (None, _) => true,
-            (Some(l_raw), Some(l_value)) => {
-                raw.abs_diff(l_raw) > self.deadband && value != l_value
-            }
-            _ => unreachable!(),
+        let value_changed = match self.last_value {
+            None => true,
+            Some(l_value) => value != l_value,
         };
-        if send {
+        let raw_exited_lock = match (self.last_raw, value_changed) {
+            (None, _) => true,
+            (Some(_), false) => false, // same bucket — ignore raw jitter
+            (Some(l_raw), true) => raw.abs_diff(l_raw) > self.deadband,
+        };
+        if value_changed && raw_exited_lock {
             self.last_raw = Some(raw);
             self.last_value = Some(value);
             Some(value)
@@ -63,13 +76,13 @@ impl Pot {
 #[embassy_executor::task]
 pub async fn pot_task(
     adc1: ADC1<'static>,
-    fps_pin: GPIO34<'static>,
-    exp_pin: GPIO35<'static>,
+    fps_pin: GPIO1<'static>,
+    exp_pin: GPIO2<'static>,
 ) {
     let mut cfg = AdcConfig::new();
-    let mut fps_adc: AdcPin<GPIO34<'static>, ADC1> =
+    let mut fps_adc: AdcPin<GPIO1<'static>, ADC1> =
         cfg.enable_pin(fps_pin, Attenuation::_11dB);
-    let mut exp_adc: AdcPin<GPIO35<'static>, ADC1> =
+    let mut exp_adc: AdcPin<GPIO2<'static>, ADC1> =
         cfg.enable_pin(exp_pin, Attenuation::_11dB);
     let mut adc = Adc::new(adc1, cfg);
 
@@ -78,8 +91,17 @@ pub async fn pot_task(
     let mut ticker = Ticker::every(Duration::from_millis(POLL_MS));
 
     info!("ui: pots up — fps ADC1_CH6, exposure ADC1_CH7");
+    #[cfg(feature = "debug-prints")]
+    static POT_TICK: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
     loop {
         ticker.next().await;
+        #[cfg(feature = "debug-prints")]
+        {
+            let n = POT_TICK.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            if n % 33 == 0 {
+                log::info!("dbg: pot alive");
+            }
+        }
 
         if let Ok(raw) = adc.read_oneshot(&mut fps_adc) {
             let v = (FPS_MIN as u32 + raw as u32 * (FPS_MAX as u32 - FPS_MIN as u32)

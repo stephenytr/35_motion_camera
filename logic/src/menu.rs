@@ -8,11 +8,12 @@ pub enum MenuItem {
     Track,
     Boost,
     Transport,
+    Reset,
     Settings,
     About,
 }
 
-pub const MENU_LEN: usize = 8;
+pub const MENU_LEN: usize = 9;
 
 const ALL: [MenuItem; MENU_LEN] = [
     MenuItem::Fps,
@@ -21,6 +22,7 @@ const ALL: [MenuItem; MENU_LEN] = [
     MenuItem::Track,
     MenuItem::Boost,
     MenuItem::Transport,
+    MenuItem::Reset,
     MenuItem::Settings,
     MenuItem::About,
 ];
@@ -38,6 +40,7 @@ impl MenuItem {
             MenuItem::Track => "TRACK",
             MenuItem::Boost => "BOOST",
             MenuItem::Transport => "TRANSPORT",
+            MenuItem::Reset => "RESET",
             MenuItem::Settings => "SETTINGS",
             MenuItem::About => "ABOUT",
         }

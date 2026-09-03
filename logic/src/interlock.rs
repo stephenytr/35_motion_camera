@@ -32,6 +32,23 @@ impl ErrorCode {
             ErrorCode::RmtBusy => 7,
         }
     }
+
+    /// Inverse of [`Self::code`] — decodes the field-atomic `Status.fault`
+    /// value the supervisor polls (ARCHITECTURE §5.2: faults are now
+    /// poll-delta-detected, not channel-delivered).
+    pub const fn from_code(code: u32) -> Option<Self> {
+        match code {
+            1 => Some(ErrorCode::DoorOpen),
+            2 => Some(ErrorCode::Jam),
+            3 => Some(ErrorCode::CriticalBattery),
+            4 => Some(ErrorCode::RollEnd),
+            5 => Some(ErrorCode::Watchdog),
+            6 => Some(ErrorCode::Brownout),
+            7 => Some(ErrorCode::RmtBusy),
+            c if c & 0x8000_0000 != 0 => Some(ErrorCode::Driver((c & 0x7FFF) as u16)),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -152,5 +169,23 @@ mod tests {
     #[test]
     fn door_closed_is_a_no_op() {
         assert_eq!(evaluate(Condition::DoorClosed), Response::default());
+    }
+
+    #[test]
+    fn code_roundtrip() {
+        for code in [
+            ErrorCode::DoorOpen,
+            ErrorCode::Jam,
+            ErrorCode::CriticalBattery,
+            ErrorCode::RollEnd,
+            ErrorCode::Watchdog,
+            ErrorCode::Brownout,
+            ErrorCode::RmtBusy,
+            ErrorCode::Driver(0x1234),
+        ] {
+            assert_eq!(ErrorCode::from_code(code.code()), Some(code));
+        }
+        assert_eq!(ErrorCode::from_code(0), None);
+        assert_eq!(ErrorCode::from_code(0x8000_0000), Some(ErrorCode::Driver(0)));
     }
 }

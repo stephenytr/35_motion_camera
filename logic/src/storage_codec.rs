@@ -17,21 +17,11 @@ const VERSION: u16 = 1;
 const HEADER_LEN: usize = 16;
 
 /// Everything the camera persists: settings + track-A/B exposed counters.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct Payload {
     pub settings: Settings,
     pub exposed_a: u32,
     pub exposed_b: u32,
-}
-
-impl Default for Payload {
-    fn default() -> Self {
-        Self {
-            settings: Settings::default(),
-            exposed_a: 0,
-            exposed_b: 0,
-        }
-    }
 }
 
 impl Payload {
@@ -140,10 +130,19 @@ impl Slot {
 /// Pick the live record across both sectors: highest valid sequence number
 /// wins; `None` if neither sector holds a valid record (fresh flash or
 /// total corruption → defaults).
+///
+/// The comparison is wraparound-safe: `seq` is deliberately allowed to wrap
+/// (`storage.rs` uses `wrapping_add`), so a plain `sa >= sb` would pick the
+/// *older* sector once `sa` wraps back past a small value while `sb` still
+/// holds a pre-wrap high sequence number. `wrapping_sub` + signed compare
+/// treats the two sequence numbers as points on a cycle, which is correct
+/// as long as they're never more than `u32::MAX / 2` apart — true here by
+/// construction, since only two sectors ping-pong and each write advances
+/// by exactly 1.
 pub fn choose(a: &[u8; SECTOR_SIZE], b: &[u8; SECTOR_SIZE]) -> Option<(Slot, u32, Payload)> {
     match (decode(a), decode(b)) {
         (Some((sa, pa)), Some((sb, pb))) => {
-            if sa >= sb {
+            if (sa.wrapping_sub(sb) as i32) >= 0 {
                 Some((Slot::A, sa, pa))
             } else {
                 Some((Slot::B, sb, pb))
@@ -208,5 +207,19 @@ mod tests {
         p.settings.fps = 21.0;
         p.exposed_b = 7;
         assert_eq!(Payload::from_bytes(&p.to_bytes()), Some(p));
+    }
+
+    #[test]
+    fn choose_is_wraparound_safe() {
+        let mut a = [0xFFu8; SECTOR_SIZE];
+        let mut b = [0xFFu8; SECTOR_SIZE];
+        // sa just wrapped past u32::MAX back to 1; sb is the pre-wrap
+        // high sequence number one step behind it. A plain `sa >= sb`
+        // would wrongly pick sb (the older record) here.
+        let sa = 1u32;
+        let sb = u32::MAX;
+        encode(&mut a, sa, &Payload::default());
+        encode(&mut b, sb, &Payload::default());
+        assert_eq!(choose(&a, &b).map(|(slot, seq, _)| (slot, seq)), Some((Slot::A, sa)));
     }
 }
