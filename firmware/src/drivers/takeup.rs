@@ -37,13 +37,12 @@ pub fn init_timer_and_channel(step: GPIO23<'static>) {
     step.connect_peripheral_to_output(esp_hal::gpio::OutputSignal::LEDC_HS_SIG1);
     let ledc = esp_hal::peripherals::LEDC::regs();
     // Timer 1: APB clock, 10-bit duty, paused with a placeholder divisor
-    // until the first set_rate_fps. div_num is Q8 fixed-point (esp-hal:
-    // `(src_freq << 8) / freq / precision`); 20000 ≈ 1 kHz at 80 MHz/1024.
+    // until the first set_rate_fps.
     ledc.hstimer(1).conf().modify(|_, w| unsafe {
         w.tick_sel().bit(true);
         w.rst().clear_bit();
         w.pause().clear_bit();
-        w.div_num().bits(20000);
+        w.div_num().bits(78); // 80 MHz / (78 × 1024) ≈ 1 kHz placeholder
         w.duty_res().bits(DUTY_BITS as u8)
     });
     // Channel 1: bound to timer 1, output enabled, duty 0.
@@ -74,19 +73,9 @@ impl Takeup {
     /// Set the takeup STEP rate for a film cadence (fps, f32 for the boost
     /// ramp's slewed cadence). Re-enables the driver — `safe_state()` pulls
     /// ENN high, so every job arm must bring it back.
-    ///
-    /// `div_num` is a Q8 fixed-point divisor (matches esp-hal's own
-    /// `((src_freq as u64) << 8) / frequency / precision` — see
-    /// `ledc/timer.rs::configure()` in esp-hal), not a plain integer. The
-    /// original version omitted the `<< 8`, which made the hardware run
-    /// the timer 256x faster than intended — the coil saw a multi-MHz
-    /// pulse train it couldn't follow (buzz/vibrate, no real rotation)
-    /// instead of the few-kHz rate the cadence actually needs.
     pub fn set_rate_fps(&mut self, fps: f32) {
-        let hz = (fps.max(0.5) * TAKEUP_USTEPS_PER_FRAME as f32) as u64;
-        let divisor = ((APB_HZ as u64) << 8)
-            .div_ceil(hz * (1u64 << DUTY_BITS))
-            .clamp(256, 0x3FFFF) as u32;
+        let hz = (fps.max(0.5) * TAKEUP_USTEPS_PER_FRAME as f32) as u32;
+        let divisor = APB_HZ.div_ceil(hz * (1 << DUTY_BITS)).max(1);
         let ledc = esp_hal::peripherals::LEDC::regs();
         ledc.hstimer(1)
             .conf()
