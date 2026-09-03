@@ -12,10 +12,15 @@ pub mod isr_priority {
     pub const ASYNC: u8 = 1;
 }
 
-/// HIL timing debug strobe pin (ARCHITECTURE §11): frame strobe + phase marker.
-/// Documentation only; main.rs wires the typed pin directly.
-#[allow(dead_code)]
-pub const DEBUG_STROBE_GPIO: u8 = 27;
+// NOTE: the HIL timing debug strobe (ARCHITECTURE §11/§13, decision log
+// #16/#19) previously had a placeholder `DEBUG_STROBE_GPIO = 27` constant
+// here. Decision #32's M4c hardware swap put the shutter MOSFET gate on
+// GPIO27 (`shutter_pins::GATE`, below) and nobody updated the strobe
+// constant — it was unwired dead code so there was no *live* conflict, but
+// anyone following §11's bring-up instructions to "scope the debug strobe
+// pins" at GPIO27 would have scoped (and, if the strobe were ever wired up
+// as documented, toggled) the shutter solenoid gate instead. Removed until
+// a real free GPIO is picked for it.
 
 /// TMC2209 × 2 bench pin map (decision log #32): both drivers run in pin
 /// mode (STEP/DIR/EN; MS jumpers + Vref on the boards). The transport axis

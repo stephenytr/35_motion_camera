@@ -9,8 +9,12 @@ description = "ESP32-S3 firmware for the 35mm 1.5-perf camera (esp-hal, no_std)"
 # pull-ups; without them wired the lines float low and phantom-fire. This
 # feature gates their event handling — enable once the pull-ups are wired:
 #   cargo build --release --features frame-inch-buttons
+#   cargo build --release --features debug-prints
 default = []
 frame-inch-buttons = []
+# Debug instrumentation: per-frame traces, 1 Hz task-alive ticks, OLED draw
+# markers, and lock-contention prints. Off in normal builds.
+debug-prints = []
 
 [dependencies]
 logic.workspace = true

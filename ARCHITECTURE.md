@@ -104,7 +104,6 @@ the shutter waveform; the deadman watches the whole chain.
 ```
 t0  ── heartbeat fires: phase=FRAME_START
         · start RMT transaction (non-blocking, preloaded µstep table)   ──► film moves
-        · update take-up LEDC duty (feedforward for current fps)
         · re-arm self for (pulldown + settle)
 t1  ── heartbeat fires: phase=EXPOSE_START  (film stationary, settled)
         · shutter FET: LEDC duty 100% (pull-in)
@@ -152,9 +151,15 @@ Fails closed by spring on duty 0 / power loss [LOCKED].
 
 ### 3.4 Take-up [ARCH]
 
-LEDC ch1 + DIR GPIO. Duty = feedforward table entry for effective fps (director sets at
-job start and boost ramps; heartbeat refreshes per frame). Creep duty in INCH/REWIND.
-Direction from job. No closed loop in v1 [LOCKED].
+LEDC ch1 + DIR GPIO. Duty = feedforward table entry for effective fps. Rate updates
+happen at job-arm (director, `arm_with_takeup`) and on the director's 100 ms boost-ramp
+tick — **task plane, not per-frame from the heartbeat ISR** (an earlier revision of this
+section said "heartbeat refreshes per frame"; that was never true in code and has been
+corrected here — audit finding, 2026-09-03). This is a deliberate, accepted deviation
+from invariant 1 for this one axis only: takeup tolerance is loose by design (open-loop
+feedforward behind a mechanical friction clutch, §3.4/§4.2 SPECS), so task-scheduled
+updates are fine. Creep duty in INCH/REWIND. Direction from job. No closed loop in v1
+[LOCKED].
 
 ### 3.5 Timer inventory [ARCH]
 
@@ -390,6 +395,18 @@ mid-run power pull loses the current run's frames since last idle event; `Recove
 recovers position ± 1 frame via the index sensor. If losing that count is unacceptable,
 the alternative is external FRAM/EEPROM on a spare I²C address (hardware change).
 
+**TMC driver-fault detection (SPECS §11 row "TMC driver fault")**: decision #32's M4c
+hardware swap to two TMC2209s in pin mode (STEP/DIR/EN only) retired the SPI/telemetry
+layer entirely — there is no DRV_STATUS/StallGuard read path anymore, so this locked
+interlock-matrix row currently has **no detection mechanism at all** (not merely
+unwired: the signal it would react to no longer exists on this hardware).
+`logic::interlock::Condition::DriverFault` and `firmware::supervisor`'s handling of it
+are implemented and tested end-to-end for *if* a code ever supplies the condition —
+only the sensing side is missing. Needs one of: (a) a current-sense/IPROPI-style proxy
+threshold, (b) re-adding a comms channel to at least one axis for periodic status
+polling, or (c) formal sign-off that this row is out of scope for v1 pin-mode hardware
+(audit finding, 2026-09-03 — flagged, not yet resolved).
+
 ---
 
 ## 13. Open Verification Items ([VERIFY] — bring-up checklist)
@@ -439,3 +456,4 @@ the alternative is external FRAM/EEPROM on a spare I²C address (hardware change
 | 30 | FPS pot input (bench): B10K as a divider on GPIO34 = ADC1_CH6 (input-only pin, no pull needed), 11 dB attenuation, polled at 100 ms. Raw quantized into whole-fps buckets 3..=36 (same full-step model as the menu adjust — the earlier 0.5-step f32 setting was fake precision: every consumer rounded to integers, so display and motor disagreed). A `UiEvent::SetFps` fires only when the bucket changes after two agreeing samples (no boundary flicker) and the supervisor dedupes against the current setting, so an idle pot never fights menu edits. FPS changes apply to settings + the next arm; a running take keeps its armed cadence (only boost ramps are live-updatable — #26) | signed off 2026-08-30 |
 | 31 | Shooting cluster + second pot (M4b): BOOST=GPIO33 (internal pull-up), FRAME=GPIO36, INCH=GPIO39 (input-only — bench wires external 10k pull-ups on 36/39); DOOR stays on GPIO4, bench-wired as a momentary button (hold = closed). Exposure pot on GPIO35 = ADC1_CH7, sharing the ADC1 unit and deadband-hysteresis pattern with the fps pot (2..=1000 ms whole steps). Semantics per SPECS §9.2: BOOST hold = live boost ramp (ignored when parked — boost is a sub-state of RUN §4.2); FRAME = one-frame Run when parked; INCH hold = Inch{MAX} until release sends Stop (frame-boundary park). Shooting-cluster buttons are always live, from any menu level (like RUN) | signed off 2026-08-30 |
 | 32 | Hardware swap to two TMC2209s + real shutter + spec OLED (M4c): (1) **Both axes in pin mode** — STEP/DIR/EN only; MS jumpers (16 µsteps) + Vref on the boards; the SPI/telemetry layer (tmc.rs: two-transaction read quirk, DRV_STATUS polling, S2G/OL advisories) is retired, so there is no comms self-test or fault polling anymore. Transport keeps EN=14/STEP=15/DIR=32; takeup reuses the freed SPI pins EN=12/STEP=23/DIR=21. (2) **Takeup = LEDC pulse train**: HS timer 1 + channel 1, 10-bit duty at 50%, raw-register rate changes from the director; feedforward ≈ 363 µsteps/frame (`TAKEUP_USTEPS_PER_FRAME`, 20 mm spool core — ballpark, the friction clutch is the real tension loop). (3) **Real shutter**: the LEDC channel 0 output drives a MOSFET gate (active-high — the bench inversion is gone); solenoid + 1N4001 flyback + 10k gate pulldown per the wiring guide; peak-and-hold duty table unchanged (100/25/0). (4) **SSD1306 OLED 128×64** (ssd1306 0.9 + embedded-graphics 0.8, FONT_8X13, addr 0x3C/0x3D) replaces the retired 1602A — same two-line UI render, presentation-agnostic. (5) Fixed a latent re-enable bug found during the swap: safe_state() pulls both ENNs high, but nothing re-enabled the drivers afterwards — `arm_with_takeup` now re-enables both axes on every job arm | signed off 2026-09-02 |
+| 33 | Full-codebase audit + fix pass (2026-09-03), no hardware/spec changes: (1) takeup LEDC divisor's Q8 fixed-point scale (#0c6a8b1) had been reverted (#8fb88fa) without a follow-up fix — re-applied; the bug was live at HEAD (256x too fast). (2) `heartbeat::halt()` (door/jam callers) never reset `Cycle::phase`, generalizing the decision-#21 phantom-frame bug to every halt() path, not just the voluntary park — now forces `FrameStart` unconditionally. (3) `rt::arm_job`'s "only between jobs" precondition was enforced for Run/Inch/Frame but not the menu's TRANSPORT actions (Rewind/LeaderMark/TrackBSetup) — added the same `is_parked()` gate at both the supervisor and director call sites. (4) Low-battery interlock: only one ADC threshold existed (mapped to the wrong ErrorCode) and `Event::Fault` never actually stopped anything — `power.rs` now raises both SPECS §11 thresholds (19.8 V warn-only, 18.3 V critical), and the supervisor's fault handler now runs every fault through `logic::interlock::evaluate()` and acts on `stop_now`/`stop_at_frame_end`/`persist`, not just the display code. (5) Added `fault::raise()` as the actual backstop decision #26 already claimed existed: writes `status.fault` directly (not only the lossy cross-core channel) for every raised fault, matching the pattern already used for frame counters; `RunToggle` now blocks on a nonzero latched fault and treats the next RUN press as the acknowledgement SPECS §11 requires (there was no ack path at all before). (6) The `.noinit` boot fault marker was logged but never surfaced into `Status` — a watchdog-reboot now correctly shows `ERR` at boot instead of a clean `IDLE`. (7) `RECOVER_PENDING` could leak from an aborted/interrupted Recover job into an unrelated later job and spuriously stop it — cleared on the jam/misalign fault path and on every `arm_job`. (8) Door debounce swallowed the true open transition when a bounce burst's first sample happened to read "closed" — rebiased so any "open" reading is accepted immediately (fail-safe direction), only "closed" readings go through the spacing debounce. (9) The persisted exposed-frame counter (the only film-end safety mechanism per SPECS §5 — no physical end-of-roll sensor) was never restored at boot, silently resetting to 0 on every reboot, not just the documented idle-boundary loss (§12) — supervisor now seeds it from the flash-loaded payload. (10) Added `liveness` module + wired it into `wdt.rs`: the RTC-watchdog feed was gated only on `rt::safe_active()`, so a command-plane task hung-but-still-yielding was invisible to it; now every command-plane task's per-loop counter must advance within a 3 s window. (11) `ui_task`'s `.expect("i2c init")` could panic the whole core-0 executor (same blast radius as a supervisor panic) — now degrades to headless mode like every other OLED failure path already does. (12) Minor: removed the stale `DEBUG_STROBE_GPIO` constant (numerically collided with the M4c shutter-gate pin after #32's pin-map change, though never wired); `storage_codec::choose()`'s sequence comparison is now wraparound-safe; `Settings::is_valid()` now range-checks the ramp-rate fields; stale doc text in §3.1/§3.4 claiming per-frame heartbeat-driven takeup updates corrected to match the actual task-plane (job-arm + boost-tick) implementation. (13) TMC driver-fault detection (SPECS §11 row) has no sensing mechanism since #32 retired SPI telemetry — flagged as an open deviation in §12, not fixed here (requires a hardware or scope decision, not a code fix) | signed off 2026-09-03 |

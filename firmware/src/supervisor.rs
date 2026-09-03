@@ -6,9 +6,12 @@
 //! the heartbeat ISR increments `status::STATUS.exposed_count` directly (the
 //! event channel is per-core-CS and drops cross-core sends at frame rates;
 //! decision log #23), and this task polls it every 20 ms along with the RT
-//! film position (rewind frames decrement the counter). Roll-end auto-stops
-//! via the interlock matrix; counters are persisted at job boundaries only
-//! (idle-gated writes).
+//! film position (rewind frames decrement the counter). Faults are poll-based
+//! for the same reason: `fault::raise()` writes `status.fault` directly and
+//! this task reacts to deltas — `RmtBusy` can raise at frame rate, and a
+//! cross-core event per raise raced the channel's per-core mutex. Roll-end
+//! auto-stops via the interlock matrix; counters are persisted at job
+//! boundaries only (idle-gated writes).
 
 use embassy_time::{Duration, with_timeout};
 use log::{info, warn};
@@ -21,7 +24,36 @@ use crate::ui::{TransportAction, UiEvent, UI_EVENTS};
 use logic::menu::MenuItem;
 use logic::settings::Track;
 
-/// Counter-poll cadence (roll-end must catch within a frame at any fps).
+/// Map a raised `ErrorCode` to the `logic::interlock::Condition` whose
+/// tested `Response` should drive the supervisor's reaction. `RollEnd` is
+/// evaluated directly at its own call site (it already carries `FilmEnd`
+/// semantics there); `RmtBusy` is deliberately excluded — ARCHITECTURE §3.2
+/// documents it as a one-frame-late, self-recovering condition ("cadence
+/// continues"), not a stop condition.
+fn fault_condition(code: logic::interlock::ErrorCode) -> Option<logic::interlock::Condition> {
+    use logic::interlock::{Condition, ErrorCode};
+    match code {
+        ErrorCode::DoorOpen => Some(Condition::DoorOpen),
+        ErrorCode::Jam => Some(Condition::Jam),
+        ErrorCode::Driver(c) => Some(Condition::DriverFault(c)),
+        ErrorCode::CriticalBattery => Some(Condition::CriticalBattery),
+        ErrorCode::RollEnd => Some(Condition::FilmEnd),
+        ErrorCode::Watchdog => Some(Condition::Watchdog),
+        ErrorCode::Brownout => Some(Condition::Brownout),
+        ErrorCode::RmtBusy => None,
+    }
+}
+
+/// Counter-poll cadence. NOTE: decision log #27 documents that the
+/// esp-rtos core-0 embassy executor quantizes task polling to ~100 ms in
+/// practice (a 20 ms `with_timeout` observably fires at ~100 ms) — this is
+/// 2-4 frame periods at 24-36 fps, not "within a frame" as an earlier
+/// version of this comment claimed. Roll-end and counter updates are
+/// frame-*accurate* (the counter itself is ISR-incremented) but not
+/// millisecond-accurate; the roll can overrun by a small number of frames
+/// past `roll_frames` before the poll catches it. Acceptable for v1 per
+/// #27's own precedent (`Recover`); revisit with the UI milestone if
+/// tighter roll-end precision is needed.
 const COUNTER_POLL: Duration = Duration::from_millis(20);
 
 #[embassy_executor::task]
@@ -53,14 +85,31 @@ pub async fn supervisor_task(
         }
     }
 
-    // Cumulative exposed count of the active track (SPECS §9.4). Local to
-    // this task; persisted to the settings store at job boundaries.
-    let mut exposed: u32 = 0;
+    // Cumulative exposed count of the active track (SPECS §9.4), restored
+    // from the persisted store at boot. The previous version always
+    // started this at 0 regardless of what was loaded from flash: every
+    // reboot mid-roll (not just the idle-boundary loss ARCHITECTURE §12
+    // documents) silently reset the *only* film-end safety mechanism
+    // (SPECS §5: frame-counter-only, no physical end-of-roll sensor).
+    let mut exposed: u32 = {
+        let p = settings_store::get();
+        if track_idx() == 0 { p.exposed_a } else { p.exposed_b }
+    };
+    status
+        .counter_exposed
+        .store(exposed, core::sync::atomic::Ordering::Relaxed);
+    info!("supervisor: restored exposed counter = {exposed} (track {})", track_idx());
     let mut boosting: bool = false;
     let mut inching: bool = false;
     // Last-seen values for delta detection.
     let mut last_pos: u32 = crate::rt::position::frames();
     let mut last_count: u32 = status.exposed_count.load(core::sync::atomic::Ordering::Relaxed);
+    // Faults are poll-delta-detected (raise() writes `status.fault` directly;
+    // no channel event). Seed from the current value so the boot fault
+    // marker (main.rs) doesn't re-trigger a reaction here.
+    let mut last_fault: u32 = status.fault.load(core::sync::atomic::Ordering::Relaxed);
+    let mut last_rmt_busy: u32 = status.rmt_busy.load(core::sync::atomic::Ordering::Relaxed);
+    let mut last_rmt_poll: u32 = status.rmt_poll_false.load(core::sync::atomic::Ordering::Relaxed);
 
     /// Which persisted counter slot the active track maps to (0=A, 1=B).
     fn track_idx() -> u8 {
@@ -71,6 +120,31 @@ pub async fn supervisor_task(
         }
     }
 
+    /// Shared fault reaction for the poll-delta path: route through the
+    /// tested interlock table (ARCHITECTURE §5.3) instead of just latching
+    /// a display code: the table is what `cargo test -p logic` actually
+    /// verifies against SPECS §11, so it must be what decides the *action*
+    /// too, not just supply a string nobody reads. `status.fault` was
+    /// already written by `raise()`.
+    fn react_to_fault(
+        code: logic::interlock::ErrorCode,
+        cmds: &mut CmdProducer,
+        status: &'static Status,
+        exposed: &mut u32,
+    ) {
+        status.set_state(State::Error);
+        if let Some(cond) = fault_condition(code) {
+            let r = logic::interlock::evaluate(cond);
+            if r.persist {
+                settings_store::set_exposed(track_idx(), *exposed);
+            }
+            if r.stop_now || r.stop_at_frame_end {
+                let _ = cmds.enqueue(Command::Stop);
+            }
+        }
+        warn!("supervisor: Fault({code:?}) -> ERROR");
+    }
+
     /// UI command translation (ARCHITECTURE §8): validate against the
     /// interlock matrix, then enqueue the director command.
     fn handle_ui(
@@ -79,6 +153,8 @@ pub async fn supervisor_task(
         status: &'static Status,
         boosting: &mut bool,
         inching: &mut bool,
+        exposed: &mut u32,
+        last_count: &mut u32,
     ) {
         match ev {
             UiEvent::RunToggle => {
@@ -86,10 +162,25 @@ pub async fn supervisor_task(
                     warn!("supervisor: RUN ignored — door open (interlock)");
                     return;
                 }
+                // Errors latch until user acknowledgement (SPECS §11). There
+                // is no dedicated ack button, so a RUN press while a fault
+                // is latched acknowledges/clears it instead of starting —
+                // press RUN again to actually start. Without this, a fault
+                // whose event happened to be delivered (or the boot fault
+                // marker, main.rs) would permanently block every future
+                // RunToggle with no way to recover short of a reboot.
+                let fault = status.fault.load(core::sync::atomic::Ordering::Relaxed);
+                if fault != 0 {
+                    status.fault.store(0, core::sync::atomic::Ordering::Relaxed);
+                    status.set_state(State::Idle);
+                    warn!("supervisor: fault {fault:#x} acknowledged — press RUN again to start");
+                    return;
+                }
                 if crate::rt::heartbeat::is_parked() {
                     let s = settings_store::settings();
                     let fps = (s.fps + 0.5) as u8;
                     info!("supervisor: RUN -> Run {fps} fps, infinite");
+                    status.set_state(State::Run);
                     let _ = cmds.enqueue(Command::Run { fps, frames: None, shutter: true });
                 } else {
                     info!("supervisor: RUN -> Stop");
@@ -241,9 +332,30 @@ pub async fn supervisor_task(
                 info!("supervisor: FRAME -> single frame at {fps} fps");
                 let _ = cmds.enqueue(Command::Run { fps, frames: Some(1), shutter: true });
             }
+            UiEvent::ResetCounter => {
+                // Zero the exposed counter and persist (idle-gated write).
+                // Re-sync the delta baseline so frames already counted by
+                // the ISR don't re-add into the fresh counter.
+                *exposed = 0;
+                *last_count = status.exposed_count.load(core::sync::atomic::Ordering::Relaxed);
+                status.counter_exposed.store(0, core::sync::atomic::Ordering::Relaxed);
+                settings_store::set_exposed(track_idx(), 0);
+                info!("supervisor: frame counter reset (track {})", track_idx());
+            }
             UiEvent::Transport(action) => {
                 if crate::rt::door::is_open() {
                     warn!("supervisor: transport ignored — door open (interlock)");
+                    return;
+                }
+                // `rt::arm_job`'s own precondition: only valid between jobs.
+                // The menu's TRANSPORT submenu (Rewind/LeaderMark/
+                // TrackBSetup) was reachable at any run state — nothing
+                // gated it like Run/Inch/Frame already are — so pressing
+                // MENU here mid-take could slam a new job into a live
+                // pulldown/exposure. Director-side arm_with_takeup also
+                // gets a defensive is_parked() check (director/mod.rs).
+                if !crate::rt::heartbeat::is_parked() {
+                    warn!("supervisor: transport ignored — a job is running");
                     return;
                 }
                 match action {
@@ -265,6 +377,15 @@ pub async fn supervisor_task(
     }
 
     loop {
+        crate::liveness::LIVENESS.bump_supervisor();
+        #[cfg(feature = "debug-prints")]
+        {
+            static SUP_TICK: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+            let n = SUP_TICK.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            if n % 10 == 0 {
+                log::info!("dbg: sup alive");
+            }
+        }
         match with_timeout(COUNTER_POLL, events.receive()).await {
             Ok(Event::JobComplete) => {
                 settings_store::set_exposed(track_idx(), exposed);
@@ -280,30 +401,62 @@ pub async fn supervisor_task(
             }
             Ok(Event::DoorOpen) => {
                 // SPECS §11: door events persist counters + settings.
-                settings_store::set_exposed(track_idx(), exposed);
+                let r = logic::interlock::evaluate(logic::interlock::Condition::DoorOpen);
+                if r.persist {
+                    settings_store::set_exposed(track_idx(), exposed);
+                }
                 status.door_open.store(true, core::sync::atomic::Ordering::Relaxed);
                 status.set_state(State::Door);
                 info!("supervisor: DoorOpen -> DOOR");
             }
             Ok(Event::DoorClosed) => {
+                let _ = logic::interlock::evaluate(logic::interlock::Condition::DoorClosed);
                 status.door_open.store(false, core::sync::atomic::Ordering::Relaxed);
                 info!("supervisor: DoorClosed");
-            }
-            Ok(Event::Fault(code)) => {
-                status.set_state(State::Error);
-                status.fault.store(code.code(), core::sync::atomic::Ordering::Relaxed);
-                info!("supervisor: Fault({code:?}) -> ERROR");
-            }
-            Ok(Event::IndexTick) => {
-                // Sprocket index edge accepted (ARCHITECTURE §4.3) — up to
-                // ~3.6 Hz at 24 fps, so no log line; status-only.
             }
             Ok(Event::SettingsChanged) => info!("supervisor: SettingsChanged"),
             Err(_) => {
                 // 20 ms counter poll (see module docs).
                 // UI events first (same-core, cheap).
                 while let Ok(ev) = UI_EVENTS.try_receive() {
-                    handle_ui(ev, &mut cmds, status, &mut boosting, &mut inching);
+                    handle_ui(
+                        ev,
+                        &mut cmds,
+                        status,
+                        &mut boosting,
+                        &mut inching,
+                        &mut exposed,
+                        &mut last_count,
+                    );
+                }
+
+                // Fault delta detection: raise() writes `status.fault`
+                // directly (ISR-safe, core 1) — no channel event. React
+                // once per change so a stuck transfer's repeated RmtBusy
+                // stores don't re-trigger the reaction.
+                let fault = status.fault.load(core::sync::atomic::Ordering::Relaxed);
+                if fault != last_fault {
+                    last_fault = fault;
+                    if let Some(code) = logic::interlock::ErrorCode::from_code(fault) {
+                        react_to_fault(code, &mut cmds, status, &mut exposed);
+                    }
+                }
+
+                // RMT wedge diagnostics (core-1 counters, core-0 log):
+                // report whenever the anomaly counters move.
+                let rmt_busy = status.rmt_busy.load(core::sync::atomic::Ordering::Relaxed);
+                let rmt_poll = status
+                    .rmt_poll_false
+                    .load(core::sync::atomic::Ordering::Relaxed);
+                if rmt_busy != last_rmt_busy || rmt_poll != last_rmt_poll {
+                    warn!(
+                        "rmt: kicks={} busy={} poll_false={}",
+                        status.rmt_kicks.load(core::sync::atomic::Ordering::Relaxed),
+                        rmt_busy,
+                        rmt_poll,
+                    );
+                    last_rmt_busy = rmt_busy;
+                    last_rmt_poll = rmt_poll;
                 }
 
                 let count = status

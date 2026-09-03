@@ -121,8 +121,13 @@ pub async fn director_task(
     let mut transport = Transport::new();
 
     let mut last_ramp = Instant::now();
+    #[cfg(feature = "debug-prints")]
+    let mut last_traced: u32 = crate::status::STATUS
+        .exposed_count
+        .load(core::sync::atomic::Ordering::Relaxed);
 
     loop {
+        crate::liveness::LIVENESS.bump_director();
         match cmds.dequeue() {
             Some(Command::SelfTest) => {
                 info!("director: SelfTest — pin mode: no IOIN/DRV_STATUS to read");
@@ -150,6 +155,9 @@ pub async fn director_task(
                 );
             }
             Some(Command::Rewind { to_zero }) => {
+                if !heartbeat::is_parked() {
+                    warn!("director: Rewind ignored — a job is running");
+                } else {
                 transport.sync_position(rt::position::usteps());
                 let remaining = transport.rewind_plan();
                 if to_zero && remaining == 0 {
@@ -166,8 +174,12 @@ pub async fn director_task(
                         "rewind",
                     );
                 }
+                }
             }
             Some(Command::LeaderMark) => {
+                if !heartbeat::is_parked() {
+                    warn!("director: LeaderMark ignored — a job is running");
+                } else {
                 info!("director: leader marks — {LEADER_MARK_FRAMES} frames @ {CREEP_FPS:.0} fps, shutter");
                 transport.set_phase(ScriptPhase::LeaderMarks);
                 let params =
@@ -176,8 +188,12 @@ pub async fn director_task(
                     &mut tmc, &mut takeup,
                     params, Some(LEADER_MARK_FRAMES), Direction::Forward, CREEP_FPS, "leader marks",
                 );
+                }
             }
             Some(Command::TrackBSetup) => {
+                if !heartbeat::is_parked() {
+                    warn!("director: TrackBSetup ignored — a job is running");
+                } else {
                 transport.sync_position(rt::position::usteps());
                 let frames = transport.track_b_plan();
                 if frames == 0 {
@@ -192,8 +208,12 @@ pub async fn director_task(
                         params, Some(frames), Direction::Forward, CREEP_FPS, "track B setup",
                     );
                 }
+                }
             }
             Some(Command::Recover) => {
+                if !heartbeat::is_parked() {
+                    warn!("director: Recover ignored — a job is running");
+                } else {
                 // Brownout recovery (SPECS §11): creep forward and park at
                 // the next index edge — the edge acceptance path requests
                 // the park via rt::index. `frames: None`: the edge is the
@@ -201,13 +221,17 @@ pub async fn director_task(
                 // with synthetic edges (IndexEdgeAt).
                 info!("director: Recover — creeping to next index edge");
                 transport.sync_position(rt::position::usteps());
-                rt::index::arm_recover_stop(true);
                 let params =
                     logic::frame_fsm::params_for(CREEP_FPS, job.exposure_ms, false);
                 arm_with_takeup(
                     &mut tmc, &mut takeup,
                     params, None, Direction::Forward, CREEP_FPS, "recover creep",
                 );
+                // Must run *after* arm_with_takeup: rt::arm_job clears any
+                // stale recover-stop request from a previous job before
+                // arming, so setting this first would be wiped immediately.
+                rt::index::arm_recover_stop(true);
+                }
             }
             Some(Command::IndexArm) => {
                 // TEMP bench hook (see command.rs): runs on core 1 where
@@ -228,17 +252,17 @@ pub async fn director_task(
                 if !heartbeat::is_parked() {
                     takeup.set_rate_fps(fps as f32);
                 }
-                // Persist at the next idle boundary (ARCHITECTURE §12).
-                let mut s = crate::settings_store::settings();
-                s.fps = fps as f32;
-                crate::settings_store::set_settings(s);
+                // Persistence is the supervisor's job (it already wrote the
+                // store before enqueueing this command). The director must
+                // NOT touch settings_store: its cross-core spinlock is held
+                // here while esp-storage's flash write can hardware-park
+                // core 1 (`multicore_auto_park`) — parking a core that holds
+                // the lock deadlocks core 0's next store access, starves
+                // wdt_task, and reboots via SysRtcWdt with no trace.
             }
             Some(Command::SetExposure(ms)) => {
                 info!("director: SetExposure {ms} ms");
                 job.exposure_ms = ms;
-                let mut s = crate::settings_store::settings();
-                s.exposure_ms = ms;
-                crate::settings_store::set_settings(s);
             }
             Some(Command::Boost(on)) => {
                 info!("director: Boost {on}");
@@ -299,8 +323,15 @@ pub async fn director_task(
                         takeup.set_rate_fps(fps);
                     } else {
                         // Transfer in flight — retry on the next tick; the
-                        // ramp is far slower than the tick rate.
-                        warn!("director: ramp tick deferred (RMT transfer in flight)");
+                        // ramp is far slower than the tick rate. Counters
+                        // included: this line is the last thing we log on
+                        // core 1 before a wedge takes the system down.
+                        warn!(
+                            "director: ramp tick deferred (RMT transfer in flight) rmt[kicks={} busy={} poll_false={}]",
+                            crate::status::STATUS.rmt_kicks.load(core::sync::atomic::Ordering::Relaxed),
+                            crate::status::STATUS.rmt_busy.load(core::sync::atomic::Ordering::Relaxed),
+                            crate::status::STATUS.rmt_poll_false.load(core::sync::atomic::Ordering::Relaxed),
+                        );
                     }
                 } else if last_ramp.elapsed() >= RAMP_TICK {
                     last_ramp = Instant::now();
@@ -308,6 +339,16 @@ pub async fn director_task(
                 // Cooperative poll: the director has this executor to
                 // itself, but still yields so interrupts/timers stay happy.
                 Timer::after(IDLE_YIELD).await;
+            }
+        }
+        #[cfg(feature = "debug-prints")]
+        {
+            let f = crate::status::STATUS
+                .exposed_count
+                .load(core::sync::atomic::Ordering::Relaxed);
+            if f != last_traced {
+                last_traced = f;
+                info!("dbg: frame {f}");
             }
         }
     }

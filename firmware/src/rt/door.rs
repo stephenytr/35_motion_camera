@@ -34,10 +34,23 @@ const DEBOUNCE: Duration = Duration::from_millis(20);
 static DOOR: CriticalSectionMutex<RefCell<Option<Input<'static>>>> =
     CriticalSectionMutex::new(RefCell::new(None));
 
-/// Timestamp (µs since boot, truncated to 32 bits) of the last *accepted*
+/// Timestamp (µs since boot, truncated to 32 bits) of the last *processed*
 /// edge. Xtensa esp32 has no native 64-bit atomics; truncated + wrapping
 /// arithmetic is exact for a 20 ms window (wraps every ~71 min).
 static LAST_EDGE_US: AtomicU32 = AtomicU32::new(0);
+
+/// Latches `true` if *any* edge sampled "open" since the last processed
+/// edge, even one discarded as bounce. Fail-safe bias without giving up
+/// the rate limit below: debouncing purely from the last accepted edge's
+/// *level* (rather than latching across the whole window) can let a
+/// transient bounce sample decide the outcome — if the first edge in a
+/// burst happens to read "closed", every subsequent edge in that burst
+/// (including the one carrying the true "open" level) is discarded as
+/// bounce, delaying or swallowing the safety action for up to `DEBOUNCE`.
+/// Latching "open-seen" across the window instead means whichever edge
+/// finally gets processed reflects the correct level regardless of which
+/// physical transition happened to land on the processed slot.
+static OPEN_SEEN: AtomicBool = AtomicBool::new(false);
 
 /// Current debounced state. Defaults `true` (open) so a read before `init`
 /// fails safe.
@@ -79,14 +92,27 @@ extern "C" fn door_isr() {
         }
         pin.clear_interrupt();
 
+        let open = pin.is_high();
+        if open {
+            OPEN_SEEN.store(true, Ordering::Relaxed);
+        }
+
+        // Rate limit: at most one processed edge per `DEBOUNCE` window,
+        // same worst-case cost as the original scheme — this is a P3 ISR
+        // with no door switch wired on the bench yet (see `debug_force`
+        // below), so an unrated fast path here is a real interrupt-storm
+        // risk on a floating/noisy pin, not just a theoretical one: it can
+        // starve core 0 out of the cross-core critical section other
+        // tasks (e.g. `wdt_task`'s watchdog feed) also need, with no
+        // crash/log output to show why. `OPEN_SEEN` above (not the
+        // spacing gate) is what carries the fail-safe bias.
         let now_us = Instant::now().duration_since_epoch().as_micros() as u32;
         let last_us = LAST_EDGE_US.load(Ordering::Relaxed);
         if now_us.wrapping_sub(last_us) < DEBOUNCE.as_micros() as u32 {
-            return; // bounce: within the window of the last accepted edge
+            return;
         }
         LAST_EDGE_US.store(now_us, Ordering::Relaxed);
-
-        let open = pin.is_high();
+        let open = OPEN_SEEN.swap(false, Ordering::Relaxed) || open;
         apply_state(open);
     });
 }

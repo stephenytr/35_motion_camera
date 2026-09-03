@@ -25,7 +25,7 @@ use esp_hal::Blocking;
 use logic::consts::FRAME_USTEPS;
 use logic::profile::StepTable;
 
-use crate::fault::{ErrorCode, Event, EVENTS};
+use crate::fault::ErrorCode;
 
 /// 480 µstep periods + end marker.
 const MAX_CODES: usize = FRAME_USTEPS as usize + 1;
@@ -101,6 +101,9 @@ pub fn build_table(table: &StepTable) -> bool {
             }
         };
         if !free {
+            crate::status::STATUS
+                .rmt_poll_false
+                .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
             return false;
         }
         unsafe {
@@ -119,9 +122,13 @@ pub fn build_table(table: &StepTable) -> bool {
 
 /// Start the next frame's transfer (heartbeat ISR at FrameStart).
 pub fn kick() {
+    crate::status::STATUS
+        .rmt_kicks
+        .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
     SLOT.lock(|slot| {
         let mut slot = slot.borrow_mut();
         let cur = slot.take();
+        let mut busy_raise = false;
         let next = match cur {
             None => None,
             Some(Slot::Idle(ch)) => start(ch),
@@ -132,16 +139,25 @@ pub fn kick() {
                     match tx.wait() {
                         Ok(ch) => start(ch),
                         Err((_, ch)) => {
-                            let _ = EVENTS.try_send(Event::Fault(ErrorCode::RmtBusy));
+                            crate::fault::raise(ErrorCode::RmtBusy);
+                            busy_raise = true;
                             Some(Slot::Idle(ch))
                         }
                     }
                 } else {
-                    let _ = EVENTS.try_send(Event::Fault(ErrorCode::RmtBusy));
+                    crate::fault::raise(ErrorCode::RmtBusy);
+                    busy_raise = true;
                     Some(Slot::Busy(tx))
                 }
             }
         };
+        if busy_raise {
+            // The previous transfer was genuinely still running at kick
+            // time: RmtBusy raised. Count it for the wedge diagnostics.
+            crate::status::STATUS
+                .rmt_busy
+                .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        }
         *slot = next;
     });
 }
@@ -157,7 +173,7 @@ fn start(ch: Channel<'static, Blocking, Tx>) -> Option<Slot> {
     match ch.transmit(data) {
         Ok(tx) => Some(Slot::Busy(tx)),
         Err((_, ch)) => {
-            let _ = EVENTS.try_send(Event::Fault(ErrorCode::RmtBusy));
+            crate::fault::raise(ErrorCode::RmtBusy);
             Some(Slot::Idle(ch))
         }
     }

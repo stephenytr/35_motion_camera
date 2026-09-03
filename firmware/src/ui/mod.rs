@@ -56,6 +56,8 @@ pub enum UiEvent {
     Adjust { item: MenuItem, up: bool },
     /// MENU while the transport submenu is open: execute the action.
     Transport(TransportAction),
+    /// MENU on the RESET item: zero the exposed frame counter (and persist).
+    ResetCounter,
     /// Absolute fps from the pot input (whole steps, pot is the fps master
     /// while turned).
     SetFps(u8),
@@ -76,6 +78,9 @@ pub enum UiEvent {
 /// UI task → supervisor (both core 0): same-core channel, CS mutex is
 /// sound here (decision log #23 applies to cross-core use only).
 pub static UI_EVENTS: Channel<CriticalSectionRawMutex, UiEvent, 8> = Channel::new();
+
+#[cfg(feature = "debug-prints")]
+static UI_TICK: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
 
 const SAMPLE_MS: u64 = 30;
 const TRANSPORT_ACTIONS: [TransportAction; 3] = [
@@ -128,28 +133,52 @@ pub async fn ui_task(
 ) {
     // I2C pins: SDA=18, SCL=19 (decision log #29) — the chip-default 21/22
     // pair is taken (21 = takeup DIR, 22 = ▼).
-    let mut i2c = I2c::new(i2c0, I2cConfig::default())
-        .expect("i2c init")
-        .with_sda(sda)
-        .with_scl(scl);
-
-    let addr = Oled::probe(&mut i2c);
-    let mut display = match addr {
-        Some(addr) => {
-            info!("ui: SSD1306 OLED detected at I2C 0x{addr:02x}");
-            let mut display = Oled::new(i2c, addr);
-            match display.init() {
-                Ok(()) => Some(display),
-                Err(_) => {
-                    warn!("ui: OLED init failed — running headless");
+    //
+    // `ui_task` shares the core-0 executor with supervisor/power/storage/
+    // wdt — a panic here has the same blast radius as a supervisor panic
+    // (it stalls every core-0 task, including `wdt_task`, which then stops
+    // feeding the RTC watchdog). I2C peripheral construction failing is
+    // unlikely, but there is no reason to risk the whole command plane on
+    // it when the OLED is already treated as optional everywhere else
+    // (probe failure, init failure, and bus faults during operation all
+    // degrade to headless mode) — do the same here.
+    // Bounded I2C: esp-hal's default config has NO software timeout — a
+    // wedged bus (SDA held low by a glitching display, motor noise) hangs
+    // the blocking write forever, and since every core-0 task shares one
+    // cooperative executor, that single hang starved wdt_task and the RTC
+    // watchdog rebooted the chip. 400 kHz shrinks each flush (~25 ms vs
+    // ~120 ms at 100 kHz), and a 300 ms per-transaction deadline turns a
+    // stuck bus into an Err that degrades to headless instead of a freeze.
+    let i2c_cfg = I2cConfig::default()
+        .with_frequency(esp_hal::time::Rate::from_khz(400))
+        .with_software_timeout(esp_hal::i2c::master::SoftwareTimeout::Transaction(
+            esp_hal::time::Duration::from_millis(300),
+        ));
+    let mut display = match I2c::new(i2c0, i2c_cfg) {
+        Ok(i2c) => {
+            let mut i2c = i2c.with_sda(sda).with_scl(scl);
+            match Oled::probe(&mut i2c) {
+                Some(addr) => {
+                    info!("ui: SSD1306 OLED detected at I2C 0x{addr:02x}");
+                    let mut display = Oled::new(i2c, addr);
+                    match display.init() {
+                        Ok(()) => Some(display),
+                        Err(_) => {
+                            warn!("ui: OLED init failed — running headless");
+                            None
+                        }
+                    }
+                }
+                None => {
+                    // Boot diagnostic: report what actually ACKs on the bus.
+                    warn!("ui: no OLED at 0x3C/0x3D — scanning I2C bus");
+                    Oled::scan_bus(&mut i2c);
                     None
                 }
             }
         }
-        None => {
-            // Boot diagnostic: report what actually ACKs on the bus.
-            warn!("ui: no OLED at 0x3C/0x3D — scanning I2C bus");
-            Oled::scan_bus(&mut i2c);
+        Err(e) => {
+            warn!("ui: I2C init failed ({e:?}) — running headless");
             None
         }
     };
@@ -164,12 +193,14 @@ pub async fn ui_task(
 
     let mut ticker = Ticker::every(Duration::from_millis(SAMPLE_MS));
     let mut last_screen: Option<Screen> = None;
+    let mut last_flush = embassy_time::Instant::now();
     let mut boost_prev = false;
     #[cfg(feature = "frame-inch-buttons")]
     let mut inch_prev = false;
 
     loop {
         ticker.next().await;
+        crate::liveness::LIVENESS.bump_ui();
 
         let ev = buttons.sample();
 
@@ -234,6 +265,10 @@ pub async fn ui_task(
                 if ev.menu_press {
                     match item {
                         MenuItem::Transport => ui.level = Level::Transport,
+                        MenuItem::Reset => {
+                            let _ = UI_EVENTS.try_send(UiEvent::ResetCounter);
+                            ui.level = Level::Main;
+                        }
                         _ => ui.level = Level::Main,
                     }
                 }
@@ -252,16 +287,33 @@ pub async fn ui_task(
             }
         }
 
-        // Render (only on change, to keep the I2C bus quiet).
+        // Render only on change, throttled to ~20 Hz: at 30+ fps the frame
+        // counter changes every ~30 ms, which drove one ~25-40 ms blocking
+        // I2C flush per frame — the bus was in use nearly 100% of the time
+        // and motor noise at those step rates wedged it. 50 ms between
+        // flushes keeps the OLED responsive but the bus mostly idle; the
+        // screen always shows the latest state after the cap.
+        const MIN_FLUSH_INTERVAL: Duration = Duration::from_millis(50);
         let screen = render(&ui, status);
-        if last_screen != Some(screen) {
+        if last_screen != Some(screen) && last_flush.elapsed() >= MIN_FLUSH_INTERVAL {
             last_screen = Some(screen);
+            last_flush = embassy_time::Instant::now();
             if let Some(disp) = display.as_mut() {
+                #[cfg(feature = "debug-prints")]
+                {
+                    let n = UI_TICK.fetch_add(1, Ordering::Relaxed);
+                    if n % 33 == 0 {
+                        log::info!("dbg: ui alive");
+                    }
+                    log::info!("dbg: ui draw begin");
+                }
                 if disp.write_screen(&screen).is_err() {
                     // Bus fault (e.g. display yanked): go headless.
                     warn!("ui: OLED write failed — running headless");
                     display = None;
                 }
+                #[cfg(feature = "debug-prints")]
+                log::info!("dbg: ui drawn");
             }
         }
     }
@@ -325,6 +377,9 @@ fn render(ui: &UiState, status: &Status) -> Screen {
         "ERR"
     } else if !crate::rt::heartbeat::is_parked() {
         "RUN"
+    } else if status.batt_warn.load(Ordering::Relaxed) {
+        // SPECS §11/§6.2: 19.8 V warn-only — displayed, doesn't stop.
+        "BATLOW"
     } else {
         "IDLE"
     };
@@ -398,6 +453,9 @@ fn write_item_value_short(
         MenuItem::Transport => {
             let _ = write!(l, "MENU");
         }
+        MenuItem::Reset => {
+            let _ = write!(l, "MENU");
+        }
         MenuItem::Settings => {
             let _ = write!(l, "{}%", settings.hold_pct);
         }
@@ -431,6 +489,7 @@ fn short_title(item: MenuItem) -> &'static str {
         MenuItem::Track => "TRACK",
         MenuItem::Boost => "BOOST",
         MenuItem::Transport => "XPORT",
+        MenuItem::Reset => "RESET",
         MenuItem::Settings => "SET",
         MenuItem::About => "INFO",
     }

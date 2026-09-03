@@ -22,8 +22,6 @@ use core::sync::atomic::{AtomicBool, Ordering};
 use embassy_sync::blocking_mutex::CriticalSectionMutex;
 use logic::index_watch::{IndexVerdict, IndexWatch};
 
-use crate::fault::{Event, EVENTS};
-
 static WATCH: CriticalSectionMutex<RefCell<IndexWatch>> =
     CriticalSectionMutex::new(RefCell::new(IndexWatch::new()));
 
@@ -62,13 +60,19 @@ fn apply_verdict(v: IndexVerdict) {
     match v {
         IndexVerdict::Ok => {}
         IndexVerdict::Misaligned(_) | IndexVerdict::MissedEdge => {
+            // A Recover job that faults before reaching a good edge must not
+            // leave RECOVER_PENDING set — it would otherwise survive into
+            // whatever unrelated job runs next and spuriously stop it at
+            // that job's first accepted index edge (accept_edge() below is
+            // the only other place this clears).
+            RECOVER_PENDING.store(false, Ordering::SeqCst);
             crate::rt::safe_state();
             crate::rt::heartbeat::halt();
             crate::rt::shutter::disarm();
             // Same as the door path: stopping the heartbeat without
             // disarming the deadman would guarantee a watchdog reboot.
             crate::rt::deadman::disarm();
-            let _ = EVENTS.try_send(Event::Fault(logic::interlock::ErrorCode::Jam));
+            crate::fault::raise(logic::interlock::ErrorCode::Jam);
         }
     }
 }
@@ -92,7 +96,9 @@ pub fn frame_end_check() -> IndexVerdict {
 
 /// Shared acceptance path for a good edge (ISR- and task-callable).
 fn accept_edge() {
-    let _ = EVENTS.try_send(Event::IndexTick);
+    // No event: IndexTick was a no-op at the supervisor (status-only) and
+    // the channel is per-core-CS — dropping the cross-core send removes
+    // frame-rate-proportional traffic from the event channel entirely.
     if RECOVER_PENDING.swap(false, Ordering::SeqCst) {
         // Brownout recover: park at the frame boundary (SPECS §11). Safe
         // from a future P2 sensor ISR — request_stop only takes the cycle

@@ -91,8 +91,17 @@ pub async fn pot_task(
     let mut ticker = Ticker::every(Duration::from_millis(POLL_MS));
 
     info!("ui: pots up — fps ADC1_CH6, exposure ADC1_CH7");
+    #[cfg(feature = "debug-prints")]
+    static POT_TICK: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
     loop {
         ticker.next().await;
+        #[cfg(feature = "debug-prints")]
+        {
+            let n = POT_TICK.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            if n % 33 == 0 {
+                log::info!("dbg: pot alive");
+            }
+        }
 
         if let Ok(raw) = adc.read_oneshot(&mut fps_adc) {
             let v = (FPS_MIN as u32 + raw as u32 * (FPS_MAX as u32 - FPS_MIN as u32)

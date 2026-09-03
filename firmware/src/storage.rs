@@ -73,14 +73,30 @@ impl StorageBackend for FlashBackend {
     fn write_sector(&mut self, slot: Slot, sector: &[u8; SECTOR_SIZE]) -> bool {
         let addr = Self::sector_addr(slot);
         // One 4 KB sector erase, then program. Both park core 1 briefly.
+        #[cfg(feature = "debug-prints")]
+        let t0 = esp_hal::time::Instant::now();
         match self.flash.erase(addr, addr + SECTOR_SIZE as u32) {
-            Ok(()) => match self.flash.write_nor(addr, sector) {
-                Ok(()) => true,
-                Err(e) => {
-                    warn!("storage: flash write {slot:?} failed: {e:?}");
-                    false
+            Ok(()) => {
+                #[cfg(feature = "debug-prints")]
+                log::info!(
+                    "storage: erase done ({} ms)",
+                    (esp_hal::time::Instant::now() - t0).as_millis()
+                );
+                match self.flash.write_nor(addr, sector) {
+                    Ok(()) => {
+                        #[cfg(feature = "debug-prints")]
+                        log::info!(
+                            "storage: program done ({} ms total)",
+                            (esp_hal::time::Instant::now() - t0).as_millis()
+                        );
+                        true
+                    }
+                    Err(e) => {
+                        warn!("storage: flash write {slot:?} failed: {e:?}");
+                        false
+                    }
                 }
-            },
+            }
             Err(e) => {
                 warn!("storage: flash erase {slot:?} failed: {e:?}");
                 false
@@ -114,6 +130,9 @@ pub async fn storage_task(_status: &'static Status) {
 
     loop {
         ticker.next().await;
+        crate::liveness::LIVENESS.bump_storage();
+        #[cfg(feature = "debug-prints")]
+        log::info!("dbg: storage tick dirty={}", settings_store::is_dirty());
         if !settings_store::is_dirty() {
             continue;
         }
@@ -139,6 +158,10 @@ pub async fn storage_task(_status: &'static Status) {
             };
             let mut sector = [0xFFu8; SECTOR_SIZE];
             storage_codec::encode(&mut sector, seq, &payload);
+            // Log before the write: erase+program parks core 1, and if the
+            // park ever wedges (see settings_store doc), this line is the
+            // last thing on serial before the SysRtcWdt reboot.
+            info!("storage: writing seq {seq} to sector {next_slot:?} (core 1 parked)");
             if backend.write_sector(next_slot, &sector) {
                 settings_store::dirty_take();
                 info!("storage: persisted seq {seq} to sector {next_slot:?}");

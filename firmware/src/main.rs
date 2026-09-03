@@ -17,6 +17,7 @@ mod consts;
 mod director;
 mod drivers;
 mod fault;
+mod liveness;
 mod power;
 mod rt;
 mod settings_store;
@@ -45,8 +46,17 @@ async fn main(spawner: Spawner) {
 
     // Fault marker from the last run (ARCHITECTURE §4.4): the deadman writes
     // it, the RTC watchdog reboots, and we report it here before clearing.
+    // Surfaced into `status.fault` directly (not just logged) so the OLED
+    // shows "ERR" instead of a clean-looking "IDLE" after a real fault
+    // caused the reboot — SPECS §11 "errors latch until user acknowledgement"
+    // otherwise silently didn't apply to the one class of fault severe
+    // enough to reboot the whole chip. `RunToggle` (supervisor.rs) treats a
+    // RUN press while a fault is latched as an acknowledgement.
     if let Some(code) = fault::marker_take() {
         log::error!("boot: fault marker {code:#010x} — ERROR WD");
+        status::STATUS
+            .fault
+            .store(code, core::sync::atomic::Ordering::Relaxed);
     }
 
     // Brownout auto-recover (SPECS §11, ARCHITECTURE §6): a VDD dip resets
@@ -55,8 +65,14 @@ async fn main(spawner: Spawner) {
     // here, the supervisor auto-issues Recover once it's up instead of
     // requiring a manual command — the same creep-to-next-index-edge job
     // used for a manual recovery.
-    let brownout = esp_hal::rtc_cntl::reset_reason(esp_hal::system::Cpu::ProCpu)
-        == Some(esp_hal::rtc_cntl::SocResetReason::SysBrownOut);
+    let reason = esp_hal::rtc_cntl::reset_reason(esp_hal::system::Cpu::ProCpu);
+    if let Some(r) = reason {
+        // Log every reset class, not just brownout: a hard-freeze crash
+        // (unfed RWDT) shows up as SysRtcWdt here even though the deadman
+        // marker was never written, which is the only trace we get.
+        log::warn!("boot: reset reason = {r:?}");
+    }
+    let brownout = reason == Some(esp_hal::rtc_cntl::SocResetReason::SysBrownOut);
     if brownout {
         log::warn!("boot: brownout reset detected — auto-recover pending");
     }
@@ -92,7 +108,7 @@ async fn main(spawner: Spawner) {
         )
         .unwrap(),
     );
-    spawner.spawn(power::power_task(&fault::EVENTS, &status::STATUS).unwrap());
+    spawner.spawn(power::power_task(&status::STATUS).unwrap());
     spawner.spawn(storage::storage_task(&status::STATUS).unwrap());
     spawner.spawn(wdt::wdt_task(peripherals.RTC_TIMER).unwrap());
     spawner.spawn(
@@ -124,6 +140,10 @@ async fn main(spawner: Spawner) {
             drivers::shutter::init(&ledc, peripherals.GPIO27); // MOSFET gate
             drivers::rmt_step::init(peripherals.RMT, peripherals.GPIO15);
             drivers::takeup::init_timer_and_channel(peripherals.GPIO23); // takeup STEP
+            // MUST come after every TIMG0 timer setup: esp-hal `Timer::new`
+            // resets the whole TIMG0 block, wiping the LACT counter behind
+            // esp-hal's `Instant` — see rt::reinit_hal_clock.
+            rt::reinit_hal_clock();
 
             // Two TMC2209 axes in pin mode (decision log #32): transport
             // keeps the old STEP/DIR/EN pins; takeup reuses the retired SPI
@@ -149,15 +169,27 @@ async fn main(spawner: Spawner) {
     );
 
     // Keep the boot task alive as a slow heartbeat while the executors run.
+    #[cfg(feature = "debug-prints")]
+    let hal_t0 = esp_hal::time::Instant::now();
     let mut ticker = Ticker::every(Duration::from_secs(5));
     loop {
         ticker.next().await;
         log::info!("main: both executors alive");
+        #[cfg(feature = "debug-prints")]
+        log::info!(
+            "dbg: hal clock elapsed = {} ms",
+            (esp_hal::time::Instant::now() - hal_t0).as_millis()
+        );
     }
 }
 
-/// Panic: drive every actuator safe, then spin (ARCHITECTURE §4.6). The RTC
-/// watchdog keeps being fed, so the system stays safe and visible on serial.
+/// Panic: drive every actuator safe, then spin (ARCHITECTURE §4.6). Nothing
+/// feeds the RTC watchdog from inside this loop — `wdt_task` runs on the
+/// same core-0 executor as every other command-plane task, so a panic here
+/// stalls it along with everything else; the *unfed* RTC watchdog is what
+/// eventually reboots the system, landing on the fault marker (if any) at
+/// the next boot. Safe state is already applied before we start spinning,
+/// so the reboot delay is inert from a safety standpoint.
 #[panic_handler]
 fn panic(info: &core::panic::PanicInfo) -> ! {
     rt::safe_state();

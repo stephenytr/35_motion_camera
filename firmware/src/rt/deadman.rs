@@ -22,7 +22,7 @@
 use esp_hal::interrupt::{InterruptHandler, Priority};
 use logic::interlock::ErrorCode;
 
-use crate::fault::{self, Event, EVENTS};
+use crate::fault;
 
 // TIMG1 block (esp32: 0x3FF60000). Watchdog registers per IDF.
 const TIMG1_BASE: u32 = 0x3FF6_0000;
@@ -103,5 +103,5 @@ extern "C" fn deadman_isr() {
     }
     crate::rt::latch_safe_state();
     fault::marker_write(ErrorCode::Watchdog.code());
-    let _ = EVENTS.try_send(Event::Fault(ErrorCode::Watchdog));
+    crate::fault::raise(ErrorCode::Watchdog);
 }

@@ -43,6 +43,11 @@ pub fn arm_job(job: Job) {
     deadman::set_timeout(timeout_us);
     // A full job replaces params — stale live updates (boost ramp) are void.
     heartbeat::clear_live_params();
+    // A stale Recover-stop request from a previous, interrupted Recover
+    // job (stopped/superseded before any index edge arrived) must not
+    // leak into this new job and spuriously request a park at its first
+    // accepted edge. Only `Command::Recover` re-arms this.
+    index::arm_recover_stop(false);
     MAILBOX.lock(|m| *m.borrow_mut() = Some(job));
     heartbeat::kick();
 }
@@ -95,4 +100,32 @@ pub fn latch_safe_state() {
 /// True once safe state is latched.
 pub fn safe_active() -> bool {
     SAFE.load(Ordering::SeqCst)
+}
+
+/// Re-arm esp-hal's monotonic clock (the TIMG0 LACT counter).
+///
+/// esp-hal's `Instant` — which backs *every* esp-hal software deadline, e.g.
+/// the OLED I2C transaction timeout — reads the LACT. esp-hal starts it in
+/// `init()`, but every esp-hal `Timer::new` on TIMG0 (our heartbeat and
+/// shutter one-shots) calls `PeripheralClockControl::reset(TIMG0)`, which
+/// wipes the LACT config and freezes esp-hal time from that point on. Every
+/// software timeout then silently never expires: a wedged I2C bus hangs the
+/// blocking flush forever, starves the cooperative core-0 executor, and the
+/// RTC watchdog reboots the chip.
+///
+/// Call this *after* the last TIMG0 timer setup. Mirrors esp-hal's
+/// `time::implem::time_init`; APB is 80 MHz on the classic ESP32.
+pub fn reinit_hal_clock() {
+    const APB_HZ: u32 = 80_000_000;
+    let tg0 = esp_hal::peripherals::TIMG0::regs();
+    tg0.lactconfig().write(|w| unsafe { w.bits(0) });
+    tg0.lactalarmhi().write(|w| unsafe { w.bits(u32::MAX) });
+    tg0.lactalarmlo().write(|w| unsafe { w.bits(u32::MAX) });
+    tg0.lactload().write(|w| unsafe { w.load().bits(1) });
+    tg0.lactconfig().write(|w| {
+        unsafe { w.divider().bits((APB_HZ / 16_000_000u32) as u16) };
+        w.increase().bit(true);
+        w.autoreload().bit(true);
+        w.en().bit(true)
+    });
 }

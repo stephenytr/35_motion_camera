@@ -42,7 +42,9 @@ pub fn init_timer_and_channel(step: GPIO23<'static>) {
         w.tick_sel().bit(true);
         w.rst().clear_bit();
         w.pause().clear_bit();
-        w.div_num().bits(78); // 80 MHz / (78 × 1024) ≈ 1 kHz placeholder
+        // div_num is Q8 fixed-point (esp-hal: `(src_freq << 8) / freq /
+        // precision`); 20000 ≈ 1 kHz at 80 MHz / 1024 precision.
+        w.div_num().bits(20000);
         w.duty_res().bits(DUTY_BITS as u8)
     });
     // Channel 1: bound to timer 1, output enabled, duty 0.
@@ -73,9 +75,25 @@ impl Takeup {
     /// Set the takeup STEP rate for a film cadence (fps, f32 for the boost
     /// ramp's slewed cadence). Re-enables the driver — `safe_state()` pulls
     /// ENN high, so every job arm must bring it back.
+    ///
+    /// `div_num` is a Q8 fixed-point divisor (matches esp-hal's own
+    /// `((src_freq as u64) << 8) / frequency / precision` — see
+    /// `ledc/timer.rs::configure()` in esp-hal), not a plain integer. Omitting
+    /// the `<< 8` makes the hardware run the timer 256x faster than intended
+    /// — the coil sees a multi-MHz pulse train it can't follow (buzz/
+    /// vibrate, no real rotation) instead of the few-kHz rate the cadence
+    /// actually needs.
     pub fn set_rate_fps(&mut self, fps: f32) {
-        let hz = (fps.max(0.5) * TAKEUP_USTEPS_PER_FRAME as f32) as u32;
-        let divisor = APB_HZ.div_ceil(hz * (1 << DUTY_BITS)).max(1);
+        let hz = (fps.max(0.5) * TAKEUP_USTEPS_PER_FRAME as f32) as u64;
+        // div_num is Q8 fixed-point: 256 = divider 1.0 = the *slowest*
+        // possible rate (~78 Hz at 10-bit duty), and the divisor shrinks as
+        // the frequency rises (24 fps ≈ 8.7 kHz needs div ≈ 2-3). The old
+        // clamp forced a 256 *minimum*, pinning the takeup at 78 Hz for
+        // every cadence — the motor never visibly moved. Clamp low at 2
+        // (div 1 would be 20 MHz of nonsense), high at the field max.
+        let divisor = ((APB_HZ as u64) << 8)
+            .div_ceil(hz * (1u64 << DUTY_BITS))
+            .clamp(2, 0x3FFFF) as u32;
         let ledc = esp_hal::peripherals::LEDC::regs();
         ledc.hstimer(1)
             .conf()
