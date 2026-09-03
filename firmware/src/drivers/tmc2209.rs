@@ -34,10 +34,14 @@ impl Tmc2209 {
     /// Enable the outputs (called at boot after safe-state setup).
     pub fn enable(&mut self) {
         self.en.set_low();
+        #[cfg(feature = "debug-prints")]
+        log::info!("motor: transport ENN LOW (enabled), STEP on GPIO15");
     }
 
     /// Film direction for the next/current job. `true` = forward.
     pub fn set_dir(&mut self, forward: bool) {
         self.dir.set_level(if forward { self.forward_level } else { !self.forward_level });
+        #[cfg(feature = "debug-prints")]
+        log::info!("motor: transport DIR {} (GPIO32)", if forward { "HIGH (forward)" } else { "LOW (reverse)" });
     }
 }

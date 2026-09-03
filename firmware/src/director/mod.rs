@@ -66,6 +66,13 @@ fn arm_with_takeup(
         params.pull_us,
         logic::consts::PULL_ACCEL_FRAC,
     );
+    #[cfg(feature = "debug-prints")]
+    log::info!(
+        "motor: arm {what} dir={dir:?} fps={takeup_fps} pull_us={} dt=[{}..{}]us",
+        params.pull_us,
+        table.dt_us[0],
+        table.dt_us[table.len - 1],
+    );
     if rmt_step::build_table(&table) {
         // Re-enable the transport driver: safe_state() (door/JAM/fault)
         // pulls ENN high, so every arm brings it back.

@@ -94,6 +94,10 @@ impl Takeup {
         let divisor = ((APB_HZ as u64) << 8)
             .div_ceil(hz * (1u64 << DUTY_BITS))
             .clamp(2, 0x3FFFF) as u32;
+        #[cfg(feature = "debug-prints")]
+        log::info!(
+            "motor: takeup fps={fps} -> {hz} Hz, divisor={divisor} (LEDC HS timer1)",
+        );
         let ledc = esp_hal::peripherals::LEDC::regs();
         ledc.hstimer(1)
             .conf()
@@ -107,6 +111,8 @@ impl Takeup {
             .conf1()
             .modify(|_, w| w.duty_start().set_bit());
         self.en.set_low();
+        #[cfg(feature = "debug-prints")]
+        log::info!("motor: takeup ENN LOW (enabled), STEP on GPIO23");
     }
 
     /// Stop the pulse train (park, stop, halt).
@@ -116,6 +122,8 @@ impl Takeup {
         ledc.hsch(1)
             .conf1()
             .modify(|_, w| w.duty_start().set_bit());
+        #[cfg(feature = "debug-prints")]
+        log::info!("motor: takeup off (duty 0)");
     }
 
     /// Film direction for the next/current job. `true` = forward.
