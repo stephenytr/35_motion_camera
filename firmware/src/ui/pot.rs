@@ -9,7 +9,7 @@
 
 use embassy_time::{Duration, Ticker};
 use esp_hal::analog::adc::{Adc, AdcConfig, Attenuation, AdcPin};
-use esp_hal::peripherals::{ADC1, GPIO34, GPIO35};
+use esp_hal::peripherals::{ADC1, GPIO1, GPIO2};
 use log::info;
 
 use super::{UiEvent, UI_EVENTS};
@@ -76,13 +76,13 @@ impl Pot {
 #[embassy_executor::task]
 pub async fn pot_task(
     adc1: ADC1<'static>,
-    fps_pin: GPIO34<'static>,
-    exp_pin: GPIO35<'static>,
+    fps_pin: GPIO1<'static>,
+    exp_pin: GPIO2<'static>,
 ) {
     let mut cfg = AdcConfig::new();
-    let mut fps_adc: AdcPin<GPIO34<'static>, ADC1> =
+    let mut fps_adc: AdcPin<GPIO1<'static>, ADC1> =
         cfg.enable_pin(fps_pin, Attenuation::_11dB);
-    let mut exp_adc: AdcPin<GPIO35<'static>, ADC1> =
+    let mut exp_adc: AdcPin<GPIO2<'static>, ADC1> =
         cfg.enable_pin(exp_pin, Attenuation::_11dB);
     let mut adc = Adc::new(adc1, cfg);
 

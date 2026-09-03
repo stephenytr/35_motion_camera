@@ -23,11 +23,10 @@ pub mod isr_priority {
 // a real free GPIO is picked for it.
 
 /// TMC2209 × 2 bench pin map (decision log #32): both drivers run in pin
-/// mode (STEP/DIR/EN; MS jumpers + Vref on the boards). The transport axis
-/// keeps the old 2240 STEP/DIR/EN pins (15/32/14); the takeup reuses the
-/// pins the retired SPI interface freed (23/21/13). A WROVER devkit's
-/// internal flash/PSRAM consumes GPIO 6-11 and 16-17. Documented here
-/// (not type-level: pins are compile-time GPIO types in main.rs).
+/// mode (STEP/DIR/EN; MS jumpers + Vref on the boards). S3 port (decision
+/// log #33): GPIO22-25 don't exist on the ESP32-S3 and GPIO33-37 are octal
+/// PSRAM on the N16R8 module, so the takeup STEP moved 23 → 38; transport
+/// pins (14/15/32) are free on the S3 and stay put.
 ///
 /// TAKEUP_EN was originally GPIO12 — moved to GPIO13. GPIO12 (MTDI) is an
 /// ESP32 boot strapping pin that selects flash voltage (VDD_SDIO) at
@@ -37,7 +36,7 @@ pub mod isr_priority {
 /// corrupting every SPI read (`invalid header: 0xffffffff`) until the RTC
 /// WDT fired again — a multi-cycle boot-loop that looked like "the whole
 /// system halts" after any unrelated reset during a run. GPIO13 is not a
-/// strapping pin and is otherwise unused on this board.
+/// strapping pin on either chip.
 #[allow(dead_code)]
 pub mod tmc2209_pins {
     /// ENN — active LOW: low = driver enabled, high = disabled/freewheel.
@@ -45,31 +44,33 @@ pub mod tmc2209_pins {
     pub const TRANSPORT_STEP: u8 = 15;
     pub const TRANSPORT_DIR: u8 = 32;
     pub const TAKEUP_EN: u8 = 13;
-    /// Takeup STEP is an LEDC pulse train (channel 1), not RMT.
-    pub const TAKEUP_STEP: u8 = 23;
+    /// Takeup STEP is an LEDC pulse train (LS channel 1 on the S3).
+    pub const TAKEUP_STEP: u8 = 38;
     pub const TAKEUP_DIR: u8 = 21;
 }
 
-/// Bench UI pin map (decision log #29/#31): SSD1306 OLED on I2C0 + seven
-/// buttons + two pots. SDA/SCL are 18/19 (the chip-default 21/22 pair is
-/// taken by the takeup DIR / ▼). All buttons active-low with internal
-/// pull-ups except the input-only 36/39.
+/// Bench UI pin map (decision log #29/#31/#33): SSD1306 OLED on I2C0 +
+/// seven buttons + two pots. S3 moves: SCL off GPIO19 (USB D- on devkits)
+/// to 17; MENU/▲/▼ off 25/26/22 (nonexistent/PSRAM) to 26/29/28; BOOST off
+/// 33 (octal PSRAM) to 48; FRAME off 36 (octal PSRAM) to 12; pots off
+/// 34/35 (not ADC pins on the S3) to GPIO1/2 = ADC1_CH0/1. All buttons
+/// active-low with internal pull-ups (the S3 supports pull-ups on every
+/// GPIO — the classic-ESP32 external-pull-up requirement is retired).
 #[allow(dead_code)]
 pub mod ui_pins {
     pub const OLED_SDA: u8 = 18;
-    pub const OLED_SCL: u8 = 19;
+    pub const OLED_SCL: u8 = 17;
     pub const RUN: u8 = 5;
-    pub const MENU: u8 = 25;
-    pub const UP: u8 = 26;
-    pub const DOWN: u8 = 22;
-    /// Shooting cluster (SPECS §9.3). 33 has an internal pull-up; 36/39
-    /// are input-only and need external 10k pull-ups on the bench.
-    pub const BOOST: u8 = 33;
-    pub const FRAME: u8 = 36;
+    pub const MENU: u8 = 26;
+    pub const UP: u8 = 29;
+    pub const DOWN: u8 = 28;
+    /// Shooting cluster (SPECS §9.3).
+    pub const BOOST: u8 = 48;
+    pub const FRAME: u8 = 12;
     pub const INCH: u8 = 39;
     /// Pots (decision log #30): B10K dividers on ADC1.
-    pub const POT_FPS: u8 = 34;
-    pub const POT_EXPOSURE: u8 = 35;
+    pub const POT_FPS: u8 = 1;
+    pub const POT_EXPOSURE: u8 = 2;
 }
 
 /// Shutter MOSFET gate (drivers::shutter): LEDC high-speed channel 0

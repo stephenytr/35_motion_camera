@@ -63,8 +63,10 @@ static SAFE: AtomicBool = AtomicBool::new(false);
 #[esp_hal::ram]
 pub fn safe_state() {
     // Shutter + take-up LEDC channels to 0%, with the DUTY_START latch pulse.
+    // S3 note: the LEDC register block uses `ch()` accessors (no hsch/lsch
+    // split on the S3 PAC) — decision #33.
     for ch in 0..2 {
-        let ch = esp_hal::peripherals::LEDC::regs().hsch(ch);
+        let ch = esp_hal::peripherals::LEDC::regs().ch(ch);
         ch.duty().write(|w| unsafe { w.duty().bits(0) });
         ch.conf1().modify(|_, w| w.duty_start().set_bit());
     }
@@ -100,32 +102,4 @@ pub fn latch_safe_state() {
 /// True once safe state is latched.
 pub fn safe_active() -> bool {
     SAFE.load(Ordering::SeqCst)
-}
-
-/// Re-arm esp-hal's monotonic clock (the TIMG0 LACT counter).
-///
-/// esp-hal's `Instant` — which backs *every* esp-hal software deadline, e.g.
-/// the OLED I2C transaction timeout — reads the LACT. esp-hal starts it in
-/// `init()`, but every esp-hal `Timer::new` on TIMG0 (our heartbeat and
-/// shutter one-shots) calls `PeripheralClockControl::reset(TIMG0)`, which
-/// wipes the LACT config and freezes esp-hal time from that point on. Every
-/// software timeout then silently never expires: a wedged I2C bus hangs the
-/// blocking flush forever, starves the cooperative core-0 executor, and the
-/// RTC watchdog reboots the chip.
-///
-/// Call this *after* the last TIMG0 timer setup. Mirrors esp-hal's
-/// `time::implem::time_init`; APB is 80 MHz on the classic ESP32.
-pub fn reinit_hal_clock() {
-    const APB_HZ: u32 = 80_000_000;
-    let tg0 = esp_hal::peripherals::TIMG0::regs();
-    tg0.lactconfig().write(|w| unsafe { w.bits(0) });
-    tg0.lactalarmhi().write(|w| unsafe { w.bits(u32::MAX) });
-    tg0.lactalarmlo().write(|w| unsafe { w.bits(u32::MAX) });
-    tg0.lactload().write(|w| unsafe { w.load().bits(1) });
-    tg0.lactconfig().write(|w| {
-        unsafe { w.divider().bits((APB_HZ / 16_000_000u32) as u16) };
-        w.increase().bit(true);
-        w.autoreload().bit(true);
-        w.en().bit(true)
-    });
 }

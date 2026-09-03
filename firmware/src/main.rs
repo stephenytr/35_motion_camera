@@ -97,14 +97,14 @@ async fn main(spawner: Spawner) {
             &status::STATUS,
             peripherals.I2C0,
             esp_hal::gpio::AnyPin::from(peripherals.GPIO18), // LCD SDA
-            esp_hal::gpio::AnyPin::from(peripherals.GPIO19), // LCD SCL
+            esp_hal::gpio::AnyPin::from(peripherals.GPIO17), // LCD SCL (19 = USB D- on S3)
             peripherals.GPIO5,  // RUN
-            peripherals.GPIO25, // MENU
-            peripherals.GPIO26, // ▲
-            peripherals.GPIO22, // ▼
-            peripherals.GPIO33, // BOOST
-            peripherals.GPIO36, // FRAME (external 10k pull-up)
-            peripherals.GPIO39, // INCH  (external 10k pull-up)
+            peripherals.GPIO26, // MENU (22-25 don't exist on the S3)
+            peripherals.GPIO29, // ▲
+            peripherals.GPIO28, // ▼
+            peripherals.GPIO48, // BOOST (33-37 = octal PSRAM on N16R8)
+            peripherals.GPIO12, // FRAME
+            peripherals.GPIO39, // INCH
         )
         .unwrap(),
     );
@@ -114,8 +114,8 @@ async fn main(spawner: Spawner) {
     spawner.spawn(
         ui::pot::pot_task(
             peripherals.ADC1,
-            peripherals.GPIO34, // fps pot (ADC1_CH6)
-            peripherals.GPIO35, // exposure pot (ADC1_CH7)
+            peripherals.GPIO1, // fps pot (ADC1_CH0)
+            peripherals.GPIO2, // exposure pot (ADC1_CH1)
         )
         .unwrap(),
     );
@@ -139,11 +139,7 @@ async fn main(spawner: Spawner) {
             let ledc = esp_hal::ledc::Ledc::new(peripherals.LEDC);
             drivers::shutter::init(&ledc, peripherals.GPIO27); // MOSFET gate
             drivers::rmt_step::init(peripherals.RMT, peripherals.GPIO15);
-            drivers::takeup::init_timer_and_channel(peripherals.GPIO23); // takeup STEP
-            // MUST come after every TIMG0 timer setup: esp-hal `Timer::new`
-            // resets the whole TIMG0 block, wiping the LACT counter behind
-            // esp-hal's `Instant` — see rt::reinit_hal_clock.
-            rt::reinit_hal_clock();
+            drivers::takeup::init_timer_and_channel(peripherals.GPIO38); // takeup STEP
 
             // Two TMC2209 axes in pin mode (decision log #32): transport
             // keeps the old STEP/DIR/EN pins; takeup reuses the retired SPI

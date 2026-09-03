@@ -5,13 +5,11 @@ edition.workspace = true
 description = "ESP32-S3 firmware for the 35mm 1.5-perf camera (esp-hal, no_std)"
 
 [features]
-# FRAME (GPIO36) / INCH (GPIO39) are input-only pins needing external 10k
-# pull-ups; without them wired the lines float low and phantom-fire. This
-# feature gates their event handling — enable once the pull-ups are wired:
-#   cargo build --release --features frame-inch-buttons
+# FRAME / INCH used to be gated behind external 10k pull-ups on the classic
+# ESP32 (input-only pins). The ESP32-S3 has internal pull-ups on every GPIO,
+# so the buttons are always-on — the feature flag is retired (decision #33).
 #   cargo build --release --features debug-prints
 default = []
-frame-inch-buttons = []
 # Debug instrumentation: per-frame traces, 1 Hz task-alive ticks, OLED draw
 # markers, and lock-contention prints. Off in normal builds.
 debug-prints = []
@@ -28,12 +26,12 @@ static_cell = "2.1"
 embassy-executor = "0.10.0"
 embassy-sync = "0.8"
 embassy-time = "0.5.0"
-esp-rtos = { version = "0.4", features = ["embassy", "esp32"] }
-esp-hal = { version = "~1.2.0-rc.0", features = ["esp32", "unstable"] }
-esp-storage = { version = "0.10.0", features = ["critical-section"] }
-esp-backtrace = { version = "0.20", features = ["esp32", "println"] }
-esp-bootloader-esp-idf = { version = "0.6", features = ["esp32"] }
-esp-println = { version = "0.18", default-features = false, features = ["esp32", "log-04", "uart"] }
+esp-rtos = { version = "0.4", features = ["embassy", "esp32s3"] }
+esp-hal = { version = "~1.2.0-rc.0", features = ["esp32s3", "unstable"] }
+esp-storage = { version = "0.10.0", features = ["critical-section", "esp32s3"] }
+esp-backtrace = { version = "0.20", features = ["esp32s3", "println"] }
+esp-bootloader-esp-idf = { version = "0.6", features = ["esp32s3"] }
+esp-println = { version = "0.18", default-features = false, features = ["esp32s3", "log-04", "jtag-serial"] }
 embedded-graphics = "0.8"
 ssd1306 = "0.9"
 display-interface-i2c = "0.5"

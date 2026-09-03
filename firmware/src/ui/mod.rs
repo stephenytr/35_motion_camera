@@ -65,13 +65,10 @@ pub enum UiEvent {
     SetExposure(u32),
     /// BOOST held/released (SPECS §9.2: hold = boost; live-ramped mid-take).
     BoostHold(bool),
-    /// INCH held/released (hold = inch). Gated behind the
-    /// `frame-inch-buttons` feature (GPIO39 needs an external pull-up).
-    #[allow(dead_code)]
+    /// INCH held/released (hold = inch). S3 has internal pull-ups, so these
+    /// are always live (the classic-ESP32 external-pull-up gate is gone).
     InchHold(bool),
-    /// FRAME pressed: run exactly one frame. Gated behind the
-    /// `frame-inch-buttons` feature (GPIO36 needs an external pull-up).
-    #[allow(dead_code)]
+    /// FRAME pressed: run exactly one frame.
     Frame,
 }
 
@@ -124,11 +121,11 @@ pub async fn ui_task(
     sda: AnyPin<'static>,
     scl: AnyPin<'static>,
     run: esp_hal::peripherals::GPIO5<'static>,
-    menu: esp_hal::peripherals::GPIO25<'static>,
-    up: esp_hal::peripherals::GPIO26<'static>,
-    down: esp_hal::peripherals::GPIO22<'static>,
-    boost: esp_hal::peripherals::GPIO33<'static>,
-    frame: esp_hal::peripherals::GPIO36<'static>,
+    menu: esp_hal::peripherals::GPIO26<'static>,
+    up: esp_hal::peripherals::GPIO29<'static>,
+    down: esp_hal::peripherals::GPIO28<'static>,
+    boost: esp_hal::peripherals::GPIO48<'static>,
+    frame: esp_hal::peripherals::GPIO12<'static>,
     inch: esp_hal::peripherals::GPIO39<'static>,
 ) {
     // I2C pins: SDA=18, SCL=19 (decision log #29) — the chip-default 21/22
@@ -195,7 +192,6 @@ pub async fn ui_task(
     let mut last_screen: Option<Screen> = None;
     let mut last_flush = embassy_time::Instant::now();
     let mut boost_prev = false;
-    #[cfg(feature = "frame-inch-buttons")]
     let mut inch_prev = false;
 
     loop {
@@ -204,14 +200,10 @@ pub async fn ui_task(
 
         let ev = buttons.sample();
 
-        // Shooting cluster is always live (SPECS §9.3), like RUN. FRAME and
-        // INCH are feature-gated: their pins (36/39) are input-only and
-        // float low without external pull-ups, so an unwired bench
-        // phantom-fires them at boot (see Cargo.toml features).
+        // Shooting cluster is always live (SPECS §9.3), like RUN.
         if ev.run_press {
             let _ = UI_EVENTS.try_send(UiEvent::RunToggle);
         }
-        #[cfg(feature = "frame-inch-buttons")]
         {
             if ev.frame_press {
                 let _ = UI_EVENTS.try_send(UiEvent::Frame);

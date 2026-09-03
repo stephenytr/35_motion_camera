@@ -19,7 +19,7 @@ use esp_hal::gpio::interconnect::PeripheralOutput;
 use esp_hal::gpio::DriveMode;
 use esp_hal::ledc::channel::{self, ChannelIFace};
 use esp_hal::ledc::timer::{self, TimerIFace};
-use esp_hal::ledc::{HighSpeed, Ledc};
+use esp_hal::ledc::{Ledc, LowSpeed};
 use esp_hal::time::Rate;
 
 /// Duty resolution: 5-bit → 100% = 31 counts (ARCHITECTURE §3.3). The duty
@@ -31,17 +31,21 @@ const DUTY_SHIFT: u32 = 4; // integer part of the duty field starts at bit 4
 
 /// One-time setup on core 1: LEDC timer at 20 kHz (5-bit duty) + channel on
 /// `pin`, starting released (0%). Wrappers are dropped; config is in hardware.
+///
+/// S3 note (decision #33): the ESP32-S3 LEDC is the low-speed variant —
+/// `LowSpeed` timers/channels and `LSClockSource::APBClk`; the `HighSpeed`
+/// marker only exists on the classic ESP32.
 pub fn init(ledc: &Ledc<'static>, pin: impl PeripheralOutput<'static>) {
-    let mut t = ledc.timer::<HighSpeed>(timer::Number::Timer0);
+    let mut t = ledc.timer::<LowSpeed>(timer::Number::Timer0);
     t.configure(timer::config::Config {
         duty: timer::config::Duty::Duty5Bit,
-        clock_source: timer::HSClockSource::APBClk,
+        clock_source: timer::LSClockSource::APBClk,
         frequency: Rate::from_khz(20),
     })
     .unwrap();
 
     // Channel config through the HAL; duty writes are raw (see below).
-    let mut ch = ledc.channel::<HighSpeed>(channel::Number::Channel0, pin);
+    let mut ch = ledc.channel::<LowSpeed>(channel::Number::Channel0, pin);
     ch.configure(channel::config::Config {
         timer: &t,
         duty_pct: 0,
@@ -54,11 +58,22 @@ pub fn init(ledc: &Ledc<'static>, pin: impl PeripheralOutput<'static>) {
 ///
 /// The duty register is a *shadow*: hardware only transfers it into the live
 /// compare when `CONF1.DUTY_START` is pulsed (auto-cleared). Without the
-/// pulse, duty writes are silently ignored.
+/// pulse, duty writes are silently ignored. On the S3 the channel also has
+/// fade hardware, so the start pulse mirrors esp-hal's "no fading" sequence
+/// (`duty_inc` + 1 cycle of 1 step).
 fn set_duty_raw(duty_value: u32) {
-    let ch = esp_hal::peripherals::LEDC::regs().hsch(0);
-    ch.duty().write(|w| unsafe { w.duty().bits(duty_value << DUTY_SHIFT) });
-    ch.conf1().modify(|_, w| w.duty_start().set_bit());
+    let ch = esp_hal::peripherals::LEDC::regs().ch(0);
+    ch.duty()
+        .write(|w| unsafe { w.duty().bits(duty_value << DUTY_SHIFT) });
+    ch.conf1().write(|w| {
+        w.duty_start().set_bit();
+        w.duty_inc().set_bit();
+        unsafe {
+            w.duty_num().bits(0x1);
+            w.duty_cycle().bits(0x1);
+            w.duty_scale().bits(0x0)
+        }
+    });
 }
 
 /// Pull-in: 100% duty (heartbeat ISR at ExposeStart).
